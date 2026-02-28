@@ -13,6 +13,5 @@
     "canary-monitoring",
     "performance",
     "optimization"
-  ],
-  "hooks": "./hooks/hooks.json"
+  ]
 }
