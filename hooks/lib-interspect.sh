@@ -521,9 +521,10 @@ _interspect_is_routing_eligible() {
     fi
 
     # Get agent_wrong percentage — query all name variants (fd-X, interflux:fd-X, interflux:review:fd-X)
+    # Include both manual overrides and disagreement-pipeline overrides
     local total wrong pct
-    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event = 'override';")
-    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event = 'override' AND override_reason = 'agent_wrong';")
+    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override');")
+    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
 
     if (( total == 0 )); then
         echo "not_eligible:no_override_events"
@@ -579,8 +580,8 @@ _interspect_get_routing_eligible() {
         local escaped
         escaped=$(_interspect_sql_escape "$src")
         local total wrong pct
-        total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event = 'override';")
-        wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event = 'override' AND override_reason = 'agent_wrong';")
+        total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override');")
+        wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
         pct=$(( total > 0 ? wrong * 100 / total : 0 ))
 
         echo "${src}|${ec}|${sc}|${pc}|${pct}"
@@ -912,8 +913,8 @@ _interspect_apply_override_locked() {
     escaped_agent=$(_interspect_sql_escape "$agent")
     _interspect_load_confidence
     local total wrong confidence
-    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${escaped_agent}' AND event = 'override';")
-    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${escaped_agent}' AND event = 'override' AND override_reason = 'agent_wrong';")
+    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${escaped_agent}' AND event IN ('override', 'disagreement_override');")
+    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${escaped_agent}' AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
     if (( total > 0 )); then
         confidence=$(awk -v w="$wrong" -v t="$total" 'BEGIN {printf "%.2f", w/t}')
     else
@@ -1314,8 +1315,8 @@ _interspect_approve_override_locked() {
     escaped_review_prefixed=$(_interspect_sql_escape "interflux:review:${agent}")
     _interspect_load_confidence
     local total wrong confidence
-    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source IN ('${escaped_agent}', '${escaped_prefixed}', '${escaped_review_prefixed}') AND event = 'override';")
-    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source IN ('${escaped_agent}', '${escaped_prefixed}', '${escaped_review_prefixed}') AND event = 'override' AND override_reason = 'agent_wrong';")
+    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source IN ('${escaped_agent}', '${escaped_prefixed}', '${escaped_review_prefixed}') AND event IN ('override', 'disagreement_override');")
+    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source IN ('${escaped_agent}', '${escaped_prefixed}', '${escaped_review_prefixed}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
     if (( total > 0 )); then
         confidence=$(awk -v w="$wrong" -v t="$total" 'BEGIN {printf "%.2f", w/t}')
     else
@@ -1734,12 +1735,12 @@ _interspect_compute_canary_baseline() {
 
     # Override rate: overrides per session
     local total_overrides override_rate
-    total_overrides=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event = 'override' AND session_id IN (${session_ids_sql});")
+    total_overrides=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event IN ('override', 'disagreement_override') AND session_id IN (${session_ids_sql});")
     override_rate=$(awk "BEGIN {printf \"%.4f\", ${total_overrides} / ${total_sessions_in_window}}")
 
     # FP rate: agent_wrong / total overrides
     local agent_wrong_count fp_rate
-    agent_wrong_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event = 'override' AND override_reason = 'agent_wrong' AND session_id IN (${session_ids_sql});")
+    agent_wrong_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event IN ('override', 'disagreement_override') AND override_reason = 'agent_wrong' AND session_id IN (${session_ids_sql});")
     if (( total_overrides == 0 )); then
         fp_rate="0.0000"
     else
@@ -1785,8 +1786,8 @@ _interspect_record_canary_sample() {
 
     # Compute per-session metrics
     local override_count agent_wrong_count override_rate fp_rate finding_density
-    override_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}' AND event = 'override';")
-    agent_wrong_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}' AND event = 'override' AND override_reason = 'agent_wrong';")
+    override_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}' AND event IN ('override', 'disagreement_override');")
+    agent_wrong_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}' AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
 
     # Override rate: raw count for this session
     override_rate=$(awk "BEGIN {printf \"%.4f\", ${override_count} + 0}")
