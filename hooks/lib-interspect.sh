@@ -2127,7 +2127,7 @@ _interspect_consume_review_events() {
 
     local cursor_key="interspect-disagreement-review-cursor"
     local since_review
-    since_review=$(ic state get "$cursor_key" "" 2>/dev/null) || since_review="0"
+    since_review=$(ic state get "$cursor_key" "global" 2>/dev/null) || since_review="0"
     [[ -z "$since_review" ]] && since_review="0"
 
     # Query review events directly via dedicated ListReviewEvents query
@@ -2151,7 +2151,7 @@ _interspect_consume_review_events() {
 
     # Persist cursor
     if [[ "$max_id" != "$since_review" ]]; then
-        ic state set "$cursor_key" "$max_id" "" 2>/dev/null || true
+        echo "$max_id" | ic state set "$cursor_key" "global" 2>/dev/null || true
     fi
 }
 
@@ -2278,7 +2278,7 @@ _interspect_sanitize() {
 _interspect_validate_hook_id() {
     local hook_id="$1"
     case "$hook_id" in
-        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer)
+        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement)
             return 0
             ;;
         *)
