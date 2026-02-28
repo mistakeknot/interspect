@@ -2053,6 +2053,106 @@ _interspect_consume_kernel_events() {
             "" "$enriched_context" "interspect-consumer" \
             2>/dev/null || true
     done <<< "$events_json"
+
+    # Poll review events via separate query (not in UNION ALL)
+    _interspect_consume_review_events || true
+}
+
+# Process a disagreement_resolved event from the kernel review_events table.
+# Converts event payload to evidence records for each overridden agent.
+# Args: $1=event_json (full ReviewEvent JSON from ListReviewEvents — all fields preserved)
+_interspect_process_disagreement_event() {
+    local event_json="$1"
+
+    local finding_id resolution chosen_severity impact agents_json dismissal_reason session_id
+    finding_id=$(echo "$event_json" | jq -r '.finding_id // empty') || return 0
+    resolution=$(echo "$event_json" | jq -r '.resolution // empty') || return 0
+    chosen_severity=$(echo "$event_json" | jq -r '.chosen_severity // empty') || return 0
+    impact=$(echo "$event_json" | jq -r '.impact // empty') || return 0
+    agents_json=$(echo "$event_json" | jq -r '.agents_json // "{}"') || return 0
+    dismissal_reason=$(echo "$event_json" | jq -r '.dismissal_reason // empty') || return 0
+    session_id=$(echo "$event_json" | jq -r '.session_id // "unknown"') || return 0
+
+    [[ -z "$finding_id" || -z "$resolution" || -z "$chosen_severity" ]] && return 0
+
+    # Map dismissal_reason to override_reason for evidence
+    local override_reason=""
+    case "$dismissal_reason" in
+        agent_wrong)        override_reason="agent_wrong" ;;
+        deprioritized)      override_reason="deprioritized" ;;
+        already_fixed)      override_reason="stale_finding" ;;
+        not_applicable)     override_reason="agent_wrong" ;;
+        "")
+            if [[ "$resolution" == "accepted" && "$impact" == "severity_overridden" ]]; then
+                override_reason="severity_miscalibrated"
+            fi
+            ;;
+    esac
+
+    # For each agent whose severity differs from chosen, insert evidence
+    local agent_entries
+    agent_entries=$(echo "$agents_json" | jq -c 'to_entries[]' 2>/dev/null) || return 0
+
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        local agent_name agent_severity
+        agent_name=$(echo "$entry" | jq -r '.key')
+        agent_severity=$(echo "$entry" | jq -r '.value')
+
+        # Only create evidence for agents whose severity was overridden
+        [[ "$agent_severity" == "$chosen_severity" ]] && continue
+
+        local context
+        context=$(jq -n \
+            --arg finding_id "$finding_id" \
+            --arg agent_severity "$agent_severity" \
+            --arg chosen_severity "$chosen_severity" \
+            --arg resolution "$resolution" \
+            --arg impact "$impact" \
+            --arg dismissal_reason "$dismissal_reason" \
+            '{finding_id:$finding_id,agent_severity:$agent_severity,chosen_severity:$chosen_severity,resolution:$resolution,impact:$impact,dismissal_reason:$dismissal_reason}')
+
+        _interspect_insert_evidence \
+            "$session_id" "$agent_name" "disagreement_override" \
+            "$override_reason" "$context" "interspect-disagreement" \
+            2>/dev/null || true
+    done <<< "$agent_entries"
+}
+
+# Consume review events from kernel and convert to interspect evidence.
+# Uses ic state for cursor persistence (separate from the event cursor system,
+# since review events are not in the UNION ALL stream).
+_interspect_consume_review_events() {
+    command -v ic &>/dev/null || return 0
+
+    local cursor_key="interspect-disagreement-review-cursor"
+    local since_review
+    since_review=$(ic state get "$cursor_key" "" 2>/dev/null) || since_review="0"
+    [[ -z "$since_review" ]] && since_review="0"
+
+    # Query review events directly via dedicated ListReviewEvents query
+    local events_output
+    events_output=$(ic events list-review --since="$since_review" --limit=100 2>/dev/null) || return 0
+
+    [[ -z "$events_output" ]] && return 0
+
+    local max_id="$since_review"
+    while IFS= read -r event_line; do
+        [[ -z "$event_line" ]] && continue
+
+        _interspect_process_disagreement_event "$event_line" || true
+
+        local event_id
+        event_id=$(echo "$event_line" | jq -r '.id // 0') || continue
+        if [[ "$event_id" -gt "$max_id" ]]; then
+            max_id="$event_id"
+        fi
+    done <<< "$events_output"
+
+    # Persist cursor
+    if [[ "$max_id" != "$since_review" ]]; then
+        ic state set "$cursor_key" "$max_id" "" 2>/dev/null || true
+    fi
 }
 
 # Get a summary of all canaries (for status display).
