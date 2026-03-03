@@ -30,6 +30,11 @@ TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty') || exit 0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 source "${SCRIPT_DIR}/lib-interspect.sh"
 
+# Diagnostic: log CWD and DB path when debug enabled
+if [[ "${INTERSPECT_DEBUG:-}" == "1" ]]; then
+    echo "[interspect-debug] interspect-evidence.sh: CWD=$(pwd) CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-unset}" >&2
+fi
+
 # Ensure DB exists
 _interspect_ensure_db || exit 0
 

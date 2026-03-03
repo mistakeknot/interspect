@@ -30,10 +30,34 @@ _LIB_INTERSPECT_LOADED=1
 # ─── Path helpers ────────────────────────────────────────────────────────────
 
 # Returns the path to the Interspect SQLite database.
-# Uses git root if available, otherwise pwd.
+# Priority: $CLAUDE_PROJECT_DIR > git root > CWD (with guard) > fail
+# The hook CWD may be the plugin install dir, where git root resolves to the
+# plugin repo — not the project. $CLAUDE_PROJECT_DIR is the reliable source.
 _interspect_db_path() {
-    local root
-    root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    local root=""
+
+    # 1. Prefer explicit project dir (set by Claude Code for the active project)
+    if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
+        root="$CLAUDE_PROJECT_DIR"
+    fi
+
+    # 2. Fall back to git root
+    if [[ -z "$root" ]]; then
+        root=$(git rev-parse --show-toplevel 2>/dev/null) || root=""
+    fi
+
+    # 3. Fall back to CWD only if .clavain/interspect/ already exists there
+    if [[ -z "$root" && -d "$(pwd)/.clavain/interspect" ]]; then
+        root=$(pwd)
+    fi
+
+    # No valid root found — caller handles failure
+    if [[ -z "$root" ]]; then
+        [[ "${INTERSPECT_DEBUG:-}" == "1" ]] && echo "[interspect-debug] _interspect_db_path: no valid root found (CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-unset}, git=failed, cwd=$(pwd))" >&2
+        return 1
+    fi
+
+    [[ "${INTERSPECT_DEBUG:-}" == "1" ]] && echo "[interspect-debug] _interspect_db_path: root=$root" >&2
     echo "${root}/.clavain/interspect/interspect.db"
 }
 
@@ -2279,7 +2303,7 @@ _interspect_sanitize() {
 _interspect_validate_hook_id() {
     local hook_id="$1"
     case "$hook_id" in
-        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement)
+        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-verdict)
             return 0
             ;;
         *)
@@ -2337,6 +2361,180 @@ _interspect_insert_evidence() {
     local e_version="${source_version//\'/\'\'}"
 
     sqlite3 "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL);"
+}
+
+# Record a verdict outcome as evidence.
+# Called from quality-gates call site (not from lib-verdict.sh).
+# Args: $1=session_id $2=agent_name $3=status $4=findings_count $5=model_used
+_interspect_record_verdict() {
+    local session_id="${1:?session_id required}"
+    local agent_name="${2:?agent_name required}"
+    local status="${3:?status required}"
+    local findings_count="${4:-0}"
+    local model_used="${5:-unknown}"
+
+    # Ensure DB is set (consistent path for all inserts)
+    _interspect_ensure_db || return 1
+
+    # Normalize agent name (strip interflux: prefix)
+    agent_name=$(_interspect_normalize_agent_name "$agent_name")
+
+    # Build context JSON
+    local context
+    context=$(jq -n \
+        --arg status "$status" \
+        --argjson findings "$findings_count" \
+        --arg model "$model_used" \
+        '{status: $status, findings_count: $findings, model_used: $model}') || context="{}"
+
+    _interspect_insert_evidence \
+        "$session_id" \
+        "$agent_name" \
+        "verdict_outcome" \
+        "" \
+        "$context" \
+        "interspect-verdict"
+}
+
+# ─── Agent Scoring + Calibration ─────────────────────────────────────────────
+
+_INTERSPECT_CALIBRATION_MIN_SESSIONS=3
+_INTERSPECT_CALIBRATION_HIT_THRESHOLD_HIGH=0.6
+_INTERSPECT_CALIBRATION_HIT_THRESHOLD_LOW=0.3
+_INTERSPECT_CALIBRATION_CONFIDENCE_THRESHOLD=0.7
+
+# Safety floor agents — never recommend below sonnet.
+# Must match agent-roles.yaml entries. Checked at calibration output time.
+_INTERSPECT_SAFETY_FLOOR_AGENTS="fd-architecture fd-correctness fd-safety fd-quality"
+
+# Compute agent scores from evidence. Read-only DB access.
+# Note: mutates global confidence cache via _interspect_load_confidence.
+# Output: JSON array of scored agents on stdout.
+_interspect_compute_agent_scores() {
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || { echo "[]"; return 0; }
+
+    # Query: normalize agent names at query time (same CASE pattern as _interspect_get_classified_patterns)
+    local raw
+    raw=$(sqlite3 -json "$db" "
+        SELECT
+            CASE
+                WHEN source LIKE 'interflux:review:%' THEN SUBSTR(source, INSTR(source, ':') + INSTR(SUBSTR(source, INSTR(source, ':') + 1), ':') + 1)
+                WHEN source LIKE 'interflux:%' THEN SUBSTR(source, 11)
+                ELSE source
+            END as agent,
+            event,
+            json_extract(context, '$.status') as verdict_status,
+            json_extract(context, '$.findings_count') as findings_count,
+            json_extract(context, '$.model_used') as model_used,
+            session_id
+        FROM evidence
+        WHERE event IN ('agent_dispatch', 'verdict_outcome', 'override', 'disagreement_override')
+        ORDER BY agent, ts
+    " 2>/dev/null) || raw="[]"
+
+    [[ "$raw" == "[]" || -z "$raw" ]] && { echo "[]"; return 0; }
+
+    # Process with jq: group by agent, compute scores
+    echo "$raw" | jq -c --argjson min_sessions "$_INTERSPECT_CALIBRATION_MIN_SESSIONS" \
+        --argjson hit_high "$_INTERSPECT_CALIBRATION_HIT_THRESHOLD_HIGH" \
+        --argjson hit_low "$_INTERSPECT_CALIBRATION_HIT_THRESHOLD_LOW" \
+        --arg safety_agents "$_INTERSPECT_SAFETY_FLOOR_AGENTS" '
+        group_by(.agent) | map(
+            .[0].agent as $agent |
+            [.[] | select(.event == "verdict_outcome")] as $verdicts |
+            [.[] | select(.event == "agent_dispatch")] as $dispatches |
+            ([.[] | .session_id] | unique | length) as $sessions |
+            ($verdicts | length) as $verdict_count |
+            ($verdicts | map(.findings_count // 0 | tonumber) | add // 0) as $total_findings |
+            ($verdicts | map(select(.verdict_status == "NEEDS_ATTENTION")) | length) as $attention_count |
+
+            # Skip agents with insufficient evidence
+            if $sessions < $min_sessions then
+                {agent: $agent, evidence_sessions: $sessions, skip: true, reason: "insufficient_sessions"}
+            elif $verdict_count == 0 then
+                {agent: $agent, evidence_sessions: $sessions, skip: true, reason: "no_verdicts"}
+            elif $total_findings == 0 then
+                {agent: $agent, evidence_sessions: $sessions, hit_rate: null, skip: true, reason: "insufficient_findings"}
+            else
+                ($attention_count / $verdict_count) as $hit_rate |
+                (if $sessions >= 5 then 0.85
+                 elif $sessions >= 3 then 0.7
+                 else 0.5 end) as $confidence |
+
+                # Determine recommendation
+                ($safety_agents | split(" ") | any(. == $agent)) as $is_safety |
+                (if $hit_rate >= $hit_high then "sonnet"
+                 elif $hit_rate < $hit_low then
+                    if $is_safety then "sonnet"
+                    else "haiku"
+                    end
+                 else null  # no change — insufficient signal
+                 end) as $recommended |
+
+                {
+                    agent: $agent,
+                    evidence_sessions: $sessions,
+                    hit_rate: ($hit_rate * 100 | round / 100),
+                    confidence: $confidence,
+                    recommended_model: ($recommended // "sonnet"),
+                    current_model: "sonnet",
+                    reason: (
+                        if $recommended == null then "hit_rate in dead zone (0.3-0.6), no change"
+                        elif $is_safety and $hit_rate < $hit_low then "low hit rate but safety floor prevents demotion"
+                        elif $hit_rate >= $hit_high then "high hit rate, appropriate tier"
+                        elif $hit_rate < $hit_low then "low hit rate, recommend demotion"
+                        else "moderate hit rate"
+                        end
+                    ),
+                    skip: false
+                }
+            end
+        ) | [.[] | select(.skip != true)]
+    ' 2>/dev/null || echo "[]"
+}
+
+# Write routing calibration file atomically.
+# Reads agent scores, writes .clavain/interspect/routing-calibration.json.
+_interspect_write_routing_calibration() {
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || return 1
+
+    local scores
+    scores=$(_interspect_compute_agent_scores)
+    [[ "$scores" == "[]" || -z "$scores" ]] && return 0
+
+    local calibration_dir
+    calibration_dir="$(dirname "$db")"
+    local calibration_path="${calibration_dir}/routing-calibration.json"
+
+    # Build calibration JSON
+    local calibration_json
+    calibration_json=$(echo "$scores" | jq -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --argjson min "$_INTERSPECT_CALIBRATION_MIN_SESSIONS" '
+        {
+            calibrated_at: $ts,
+            schema_version: 1,
+            min_sessions: $min,
+            agents: (reduce .[] as $a ({}; . + {($a.agent): {
+                recommended_model: $a.recommended_model,
+                current_model: $a.current_model,
+                hit_rate: $a.hit_rate,
+                evidence_sessions: $a.evidence_sessions,
+                confidence: $a.confidence,
+                reason: $a.reason
+            }}))
+        }
+    ' 2>/dev/null) || return 1
+
+    # Atomic write: tmp + validate + mv
+    local tmpfile="${calibration_path}.tmp.$$"
+    printf '%s\n' "$calibration_json" > "$tmpfile"
+    if ! jq -e '.' "$tmpfile" >/dev/null 2>&1; then
+        rm -f "$tmpfile"
+        return 1
+    fi
+    mv "$tmpfile" "$calibration_path"
 }
 
 # ─── Overlay System (Type 1 Modifications) ──────────────────────────────────
