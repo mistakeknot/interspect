@@ -22,6 +22,8 @@
 #   _interspect_is_cross_cutting — check if agent is structural/cross-cutting
 #   _interspect_apply_propose — write "propose" entry to routing-overrides.json
 #   _interspect_flock_git     — serialized git operations via flock
+#   _interspect_compute_delegation_stats — per-category delegation pass rates (B4)
+#   _interspect_write_delegation_calibration — write delegation-calibration.json (B4)
 
 # Guard against re-parsing (same pattern as lib-signals.sh)
 [[ -n "${_LIB_INTERSPECT_LOADED:-}" ]] && return 0
@@ -2303,7 +2305,7 @@ _interspect_sanitize() {
 _interspect_validate_hook_id() {
     local hook_id="$1"
     case "$hook_id" in
-        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-verdict)
+        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-verdict|interspect-delegation)
             return 0
             ;;
         *)
@@ -2526,6 +2528,113 @@ _interspect_write_routing_calibration() {
             }}))
         }
     ' 2>/dev/null) || return 1
+
+    # Atomic write: tmp + validate + mv
+    local tmpfile="${calibration_path}.tmp.$$"
+    printf '%s\n' "$calibration_json" > "$tmpfile"
+    if ! jq -e '.' "$tmpfile" >/dev/null 2>&1; then
+        rm -f "$tmpfile"
+        return 1
+    fi
+    mv "$tmpfile" "$calibration_path"
+}
+
+# ─── Delegation Calibration (Track B4) ───────────────────────────────────────
+#
+# Computes per-category pass rates from delegation_outcome evidence events.
+# Output: .clavain/interspect/delegation-calibration.json
+# Consumed by: session-start.sh (injects stats into delegation policy context)
+
+_INTERSPECT_DELEGATION_MIN_DELEGATIONS=3
+
+# Compute delegation stats from evidence. Read-only DB access.
+# Output: JSON object with per-category stats on stdout.
+_interspect_compute_delegation_stats() {
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || { echo "{}"; return 0; }
+
+    local raw
+    raw=$(sqlite3 -json "$db" "
+        SELECT
+            json_extract(context, '$.category') as category,
+            json_extract(context, '$.tier') as tier,
+            json_extract(context, '$.verdict') as verdict,
+            json_extract(context, '$.retry_needed') as retry_needed,
+            json_extract(context, '$.duration_s') as duration_s
+        FROM evidence
+        WHERE event = 'delegation_outcome'
+          AND source = 'codex-delegate'
+        ORDER BY ts
+    " 2>/dev/null) || raw="[]"
+
+    [[ "$raw" == "[]" || -z "$raw" ]] && { echo "{}"; return 0; }
+
+    echo "$raw" | jq -c --argjson min "$_INTERSPECT_DELEGATION_MIN_DELEGATIONS" '
+        length as $total |
+        if $total < $min then
+            {total_delegations: $total, sufficient_data: false}
+        else
+            [.[] | select(.verdict == "pass" or .verdict == "CLEAN")] | length as $pass_count |
+            [.[] | select(.retry_needed == true or .retry_needed == "true")] | length as $retry_count |
+
+            # Per-category stats
+            (group_by(.category) | map(
+                .[0].category as $cat |
+                length as $cat_total |
+                [.[] | select(.verdict == "pass" or .verdict == "CLEAN")] | length as $cat_pass |
+                [.[] | .duration_s // 0 | tonumber] | (add / length) as $avg_dur |
+                {
+                    key: $cat,
+                    value: {
+                        count: $cat_total,
+                        pass_rate: (if $cat_total > 0 then ($cat_pass / $cat_total * 100 | round / 100) else 0 end),
+                        avg_duration_s: ($avg_dur | round)
+                    }
+                }
+            ) | from_entries) as $categories |
+
+            # Find categories with high retry rates
+            ([$categories | to_entries[] | select(.value.pass_rate < 0.70)] | map(.key)) as $high_retry |
+
+            {
+                sufficient_data: true,
+                total_delegations: $total,
+                overall_pass_rate: (if $total > 0 then ($pass_count / $total * 100 | round / 100) else 0 end),
+                retry_rate: (if $total > 0 then ($retry_count / $total * 100 | round / 100) else 0 end),
+                categories: $categories,
+                high_retry_categories: $high_retry
+            }
+        end
+    ' 2>/dev/null || echo "{}"
+}
+
+# Write delegation calibration file atomically.
+# Reads delegation stats, writes .clavain/interspect/delegation-calibration.json.
+_interspect_write_delegation_calibration() {
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || return 1
+
+    local stats
+    stats=$(_interspect_compute_delegation_stats)
+    local sufficient
+    sufficient=$(echo "$stats" | jq -r '.sufficient_data // false' 2>/dev/null)
+    [[ "$sufficient" != "true" ]] && return 0
+
+    local calibration_dir
+    calibration_dir="$(dirname "$db")"
+    local calibration_path="${calibration_dir}/delegation-calibration.json"
+
+    # Build calibration JSON
+    local calibration_json
+    calibration_json=$(echo "$stats" | jq -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
+        schema_version: 1,
+        generated_at: $ts,
+        overall_pass_rate: .overall_pass_rate,
+        total_delegations: .total_delegations,
+        retry_rate: .retry_rate,
+        categories: .categories,
+        high_retry_categories: .high_retry_categories
+    }' 2>/dev/null) || return 1
 
     # Atomic write: tmp + validate + mv
     local tmpfile="${calibration_path}.tmp.$$"

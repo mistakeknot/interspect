@@ -1,12 +1,12 @@
 ---
 name: calibrate
-description: Compute agent scores from evidence and write routing calibration
+description: Compute agent scores and delegation stats from evidence, write routing + delegation calibration
 argument-hint: ""
 ---
 
 # Interspect Calibrate
 
-Compute per-agent routing scores from evidence (agent_dispatch, verdict_outcome, override events) and write `.clavain/interspect/routing-calibration.json`.
+Compute per-agent routing scores from evidence (agent_dispatch, verdict_outcome, override events) and write `.clavain/interspect/routing-calibration.json`. Also compute delegation pass rates from delegation_outcome events and write `.clavain/interspect/delegation-calibration.json`.
 
 Requires >= 3 evidence sessions per agent before scoring. Agents with zero findings are excluded (insufficient signal). Safety floor agents are never recommended below sonnet.
 
@@ -57,5 +57,48 @@ if [[ $write_status -eq 0 ]]; then
     echo "Mode: shadow (log what would change). Set calibration.mode: enforce in routing.yaml to apply."
 else
     echo "Warning: Failed to write calibration file."
+fi
+
+# ─── Delegation Calibration (Track B4) ───────────────────────────────────────
+
+echo ""
+echo "Delegation Calibration (Codex Routing)"
+echo "======================================="
+echo ""
+
+_interspect_write_delegation_calibration
+deleg_status=$?
+
+deleg_stats=$(_interspect_compute_delegation_stats)
+sufficient=$(echo "$deleg_stats" | jq -r '.sufficient_data // false' 2>/dev/null)
+
+if [[ "$sufficient" != "true" ]]; then
+    total=$(echo "$deleg_stats" | jq -r '.total_delegations // 0' 2>/dev/null)
+    echo "Insufficient delegation data ($total delegations, need >= 3)."
+    echo "Use codex-delegate agent to build baseline."
+else
+    overall=$(echo "$deleg_stats" | jq -r '.overall_pass_rate // "n/a"' 2>/dev/null)
+    total=$(echo "$deleg_stats" | jq -r '.total_delegations // 0' 2>/dev/null)
+    retry=$(echo "$deleg_stats" | jq -r '.retry_rate // "n/a"' 2>/dev/null)
+    echo "Overall: ${overall} pass rate, ${total} delegations, ${retry} retry rate"
+    echo ""
+    printf "%-20s %8s %10s %12s\n" "Category" "Count" "Pass Rate" "Avg Duration"
+    printf "%-20s %8s %10s %12s\n" "────────" "─────" "─────────" "────────────"
+
+    echo "$deleg_stats" | jq -r '.categories | to_entries[] | [.key, (.value.count|tostring), (.value.pass_rate|tostring), ((.value.avg_duration_s|tostring) + "s")] | @tsv' | while IFS=$'\t' read -r cat count pr dur; do
+        printf "%-20s %8s %10s %12s\n" "$cat" "$count" "$pr" "$dur"
+    done
+
+    high_retry=$(echo "$deleg_stats" | jq -r '.high_retry_categories | join(", ")' 2>/dev/null)
+    if [[ -n "$high_retry" && "$high_retry" != "null" ]]; then
+        echo ""
+        echo "Categories needing attention: $high_retry"
+    fi
+
+    echo ""
+    if [[ $deleg_status -eq 0 ]]; then
+        echo "Delegation calibration written to .clavain/interspect/delegation-calibration.json"
+        echo "Mode: shadow. Set delegation.mode: enforce in routing.yaml to apply."
+    fi
 fi
 ```
