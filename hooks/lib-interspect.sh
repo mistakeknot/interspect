@@ -2570,19 +2570,20 @@ _interspect_compute_delegation_stats() {
     [[ "$raw" == "[]" || -z "$raw" ]] && { echo "{}"; return 0; }
 
     echo "$raw" | jq -c --argjson min "$_INTERSPECT_DELEGATION_MIN_DELEGATIONS" '
+        . as $all |
         length as $total |
         if $total < $min then
             {total_delegations: $total, sufficient_data: false}
         else
-            [.[] | select(.verdict == "pass" or .verdict == "CLEAN")] | length as $pass_count |
-            [.[] | select(.retry_needed == true or .retry_needed == "true")] | length as $retry_count |
+            ([.[] | select(.verdict == "pass" or .verdict == "CLEAN")] | length) as $pass_count |
+            ([.[] | select(.retry_needed == true or .retry_needed == "true" or .retry_needed == 1)] | length) as $retry_count |
 
-            # Per-category stats
-            (group_by(.category) | map(
+            # Per-category stats (use $all to avoid losing array after bindings)
+            ($all | group_by(.category) | map(
                 .[0].category as $cat |
                 length as $cat_total |
-                [.[] | select(.verdict == "pass" or .verdict == "CLEAN")] | length as $cat_pass |
-                [.[] | .duration_s // 0 | tonumber] | (add / length) as $avg_dur |
+                ([.[] | select(.verdict == "pass" or .verdict == "CLEAN")] | length) as $cat_pass |
+                ([.[] | .duration_s // 0 | tonumber] | (add / length)) as $avg_dur |
                 {
                     key: $cat,
                     value: {
