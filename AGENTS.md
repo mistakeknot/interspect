@@ -142,6 +142,19 @@ When a routing override is applied, it enters a canary period:
 cd tests && uv run pytest -q
 ```
 
+## Decay Policy
+
+Evidence and calibration data (C2) follow intermem's decay model:
+
+| Data type | Grace period | Decay rate | Hysteresis | Action |
+|-----------|-------------|------------|------------|--------|
+| Evidence records | 90 days | Excluded from analysis after 90d | N/A | Old evidence not counted in pattern detection |
+| Canary windows | 14 days | Window expires after 14d or 20 uses | N/A | Auto-evaluated at expiry |
+| Routing overrides | None | Permanent until reverted | N/A | Manual revert via `/interspect:revert` |
+| Session records | 90 days | Excluded from baseline after 90d | N/A | Old sessions not counted in canary baselines |
+
+**Standard pattern:** Grace period → linear exclusion → no hysteresis needed (evidence is append-only, not demotable). Interspect uses a 90-day rolling window rather than per-entry decay because evidence is statistical — individual records don't go "stale," but old aggregate patterns lose relevance.
+
 ## Known Constraints
 
 - `lib-interspect.sh` is 114KB — monolithic by necessity (all commands need the same DB/routing/canary functions)
