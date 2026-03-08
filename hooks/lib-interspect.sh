@@ -134,6 +134,12 @@ CREATE TABLE IF NOT EXISTS evidence (
     project_type TEXT
 );
 
+-- Lineage columns (added iv-w3ee6): trace evidence back to kernel events
+ALTER TABLE evidence ADD COLUMN source_event_id TEXT;
+ALTER TABLE evidence ADD COLUMN source_table TEXT;
+ALTER TABLE evidence ADD COLUMN raw_override_reason TEXT;
+CREATE INDEX IF NOT EXISTS idx_evidence_source_event_id ON evidence(source_event_id);
+
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     start_ts TEXT NOT NULL,
@@ -2211,6 +2217,7 @@ _interspect_consume_kernel_events() {
         _interspect_insert_evidence \
             "$session_id" "kernel-${event_source}" "${event_type}" \
             "" "$enriched_context" "interspect-consumer" \
+            "$event_id" "events" "" \
             2>/dev/null || true
     done <<< "$events_json"
 
@@ -2224,8 +2231,9 @@ _interspect_consume_kernel_events() {
 _interspect_process_disagreement_event() {
     local event_json="$1"
 
-    local finding_id resolution chosen_severity impact agents_json dismissal_reason session_id
+    local finding_id resolution chosen_severity impact agents_json dismissal_reason session_id event_id
     finding_id=$(echo "$event_json" | jq -r '.finding_id // empty') || return 0
+    event_id=$(echo "$event_json" | jq -r '.id // empty') || event_id=""
     resolution=$(echo "$event_json" | jq -r '.resolution // empty') || return 0
     chosen_severity=$(echo "$event_json" | jq -r '.chosen_severity // empty') || return 0
     impact=$(echo "$event_json" | jq -r '.impact // empty') || return 0
@@ -2241,7 +2249,7 @@ _interspect_process_disagreement_event() {
         agent_wrong)        override_reason="agent_wrong" ;;
         deprioritized)      override_reason="deprioritized" ;;
         already_fixed)      override_reason="stale_finding" ;;
-        not_applicable)     override_reason="agent_wrong" ;;
+        not_applicable)     override_reason="not_applicable" ;;
         "")
             if [[ "$resolution" == "accepted" && "$impact" == "severity_overridden" ]]; then
                 override_reason="severity_miscalibrated"
@@ -2275,6 +2283,7 @@ _interspect_process_disagreement_event() {
         _interspect_insert_evidence \
             "$session_id" "$agent_name" "disagreement_override" \
             "$override_reason" "$context" "interspect-disagreement" \
+            "$event_id" "review_events" "$dismissal_reason" \
             2>/dev/null || true
     done <<< "$agent_entries"
 }
@@ -2451,6 +2460,7 @@ _interspect_validate_hook_id() {
 
 # Insert an evidence row with sanitization.
 # Args: $1=session_id $2=source $3=event $4=override_reason $5=context_json $6=hook_id
+#       $7=source_event_id (optional) $8=source_table (optional) $9=raw_override_reason (optional)
 _interspect_insert_evidence() {
     local session_id="$1"
     local source="$2"
@@ -2458,6 +2468,9 @@ _interspect_insert_evidence() {
     local override_reason="${4:-}"
     local context_json="${5:-{}}"
     local hook_id="${6:-}"
+    local source_event_id="${7:-}"
+    local source_table="${8:-}"
+    local raw_override_reason="${9:-}"
 
     # Validate hook_id
     if [[ -n "$hook_id" ]] && ! _interspect_validate_hook_id "$hook_id"; then
@@ -2494,8 +2507,11 @@ _interspect_insert_evidence() {
     local e_context="${context_json//\'/\'\'}"
     local e_project="${project//\'/\'\'}"
     local e_version="${source_version//\'/\'\'}"
+    local e_source_event_id="${source_event_id//\'/\'\'}"
+    local e_source_table="${source_table//\'/\'\'}"
+    local e_raw_override_reason="${raw_override_reason//\'/\'\'}"
 
-    sqlite3 "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL);"
+    sqlite3 "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''));"
 }
 
 # Record a verdict outcome as evidence.
