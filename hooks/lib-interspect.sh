@@ -180,6 +180,7 @@ CREATE INDEX IF NOT EXISTS idx_evidence_ts ON evidence(ts);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
 CREATE INDEX IF NOT EXISTS idx_canary_status ON canary(status);
 CREATE INDEX IF NOT EXISTS idx_canary_file ON canary(file);
+CREATE INDEX IF NOT EXISTS idx_canary_group_status ON canary(group_id, status);
 CREATE INDEX IF NOT EXISTS idx_modifications_group ON modifications(group_id);
 CREATE INDEX IF NOT EXISTS idx_modifications_status ON modifications(status);
 CREATE INDEX IF NOT EXISTS idx_modifications_target ON modifications(target_file);
@@ -204,6 +205,10 @@ CREATE TABLE IF NOT EXISTS canary_samples (
 );
 CREATE INDEX IF NOT EXISTS idx_canary_samples_canary ON canary_samples(canary_id);
 SQL
+    # Migration: add cohort columns to canary table (iv-f7gsz)
+    sqlite3 "$db" "ALTER TABLE canary ADD COLUMN project TEXT DEFAULT '';" 2>/dev/null || true
+    sqlite3 "$db" "ALTER TABLE canary ADD COLUMN cohort_key TEXT DEFAULT '';" 2>/dev/null || true
+
     # Ensure durable cursor for kernel event consumer (E4.2/E4.5)
     # Only register if cursor doesn't exist yet (register resets position to 0)
     if command -v ic &>/dev/null; then
@@ -1018,14 +1023,27 @@ _interspect_apply_override_locked() {
         local ts
         ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+        # Check for overlapping canaries (iv-f7gsz: cohort-scoped overlap blocking)
+        local overlap_result
+        overlap_result=$(_interspect_check_canary_overlap "$agent" "" 2>/dev/null) || true
+        case "${overlap_result%%|*}" in
+            BLOCK)
+                echo "ERROR: ${overlap_result#*|}" >&2
+                return 1
+                ;;
+            WARN)
+                echo "WARN: ${overlap_result#*|}" >&2
+                ;;
+        esac
+
         # Modification record (confidence from evidence computation above)
         sqlite3 "$db" "INSERT INTO modifications (group_id, ts, tier, mod_type, target_file, commit_sha, confidence, evidence_summary, status)
             VALUES ('${escaped_agent}', '${ts}', 'persistent', 'routing', '${filepath}', '${commit_sha}', ${confidence}, '${escaped_reason}', 'applied');"
 
-        # Canary record — compute baseline BEFORE insert
+        # Canary record — compute baseline BEFORE insert, agent-scoped (iv-f7gsz)
         # (_interspect_load_confidence already called in step 3 above)
         local baseline_json
-        baseline_json=$(_interspect_compute_canary_baseline "$ts" "" 2>/dev/null || echo "null")
+        baseline_json=$(_interspect_compute_canary_baseline "$ts" "" "$agent" 2>/dev/null || echo "null")
 
         local b_override_rate b_fp_rate b_finding_density b_window
         if [[ "$baseline_json" != "null" ]]; then
@@ -1058,8 +1076,9 @@ _interspect_apply_override_locked() {
             baseline_values="${b_override_rate}, ${b_fp_rate}, ${b_finding_density}, '${escaped_bwindow}'"
         fi
 
-        if ! sqlite3 "$db" "INSERT INTO canary (file, commit_sha, group_id, applied_at, window_uses, window_expires_at, baseline_override_rate, baseline_fp_rate, baseline_finding_density, baseline_window, status)
-            VALUES ('${filepath}', '${commit_sha}', '${escaped_agent}', '${ts}', ${_INTERSPECT_CANARY_WINDOW_USES:-20}, '${expires_at}', ${baseline_values}, 'active');"; then
+        local cohort_key="${agent}:*"
+        if ! sqlite3 "$db" "INSERT INTO canary (file, commit_sha, group_id, applied_at, window_uses, window_expires_at, baseline_override_rate, baseline_fp_rate, baseline_finding_density, baseline_window, status, project, cohort_key)
+            VALUES ('${filepath}', '${commit_sha}', '${escaped_agent}', '${ts}', ${_INTERSPECT_CANARY_WINDOW_USES:-20}, '${expires_at}', ${baseline_values}, 'active', '', '${cohort_key}');"; then
             # Canary failure is non-fatal but flagged in DB
             sqlite3 "$db" "UPDATE modifications SET status = 'applied-unmonitored' WHERE commit_sha = '${commit_sha}';" 2>/dev/null || true
             echo "WARN: Canary monitoring failed — override active but unmonitored." >&2
@@ -1418,9 +1437,22 @@ _interspect_approve_override_locked() {
         echo "WARN: Modification record insert failed — override is active but untracked." >&2
     fi
 
-    # 9. Canary record — compute baseline BEFORE insert
+    # 9. Overlap check (iv-f7gsz)
+    local overlap_result
+    overlap_result=$(_interspect_check_canary_overlap "$agent" "" 2>/dev/null) || true
+    case "${overlap_result%%|*}" in
+        BLOCK)
+            echo "ERROR: ${overlap_result#*|}" >&2
+            return 1
+            ;;
+        WARN)
+            echo "WARN: ${overlap_result#*|}" >&2
+            ;;
+    esac
+
+    # 10. Canary record — compute baseline BEFORE insert, agent-scoped (iv-f7gsz)
     local baseline_json
-    baseline_json=$(_interspect_compute_canary_baseline "$ts" "" 2>/dev/null || echo "null")
+    baseline_json=$(_interspect_compute_canary_baseline "$ts" "" "$agent" 2>/dev/null || echo "null")
 
     local b_override_rate b_fp_rate b_finding_density b_window
     if [[ "$baseline_json" != "null" ]]; then
@@ -1453,14 +1485,15 @@ _interspect_approve_override_locked() {
         baseline_values="${b_override_rate}, ${b_fp_rate}, ${b_finding_density}, '${escaped_bwindow}'"
     fi
 
-    if ! sqlite3 "$db" "INSERT INTO canary (file, commit_sha, group_id, applied_at, window_uses, window_expires_at, baseline_override_rate, baseline_fp_rate, baseline_finding_density, baseline_window, status)
-        VALUES ('${escaped_filepath}', '${commit_sha}', '${escaped_agent}', '${ts}', ${_INTERSPECT_CANARY_WINDOW_USES:-20}, '${expires_at}', ${baseline_values}, 'active');"; then
+    local cohort_key="${agent}:*"
+    if ! sqlite3 "$db" "INSERT INTO canary (file, commit_sha, group_id, applied_at, window_uses, window_expires_at, baseline_override_rate, baseline_fp_rate, baseline_finding_density, baseline_window, status, project, cohort_key)
+        VALUES ('${escaped_filepath}', '${commit_sha}', '${escaped_agent}', '${ts}', ${_INTERSPECT_CANARY_WINDOW_USES:-20}, '${expires_at}', ${baseline_values}, 'active', '', '${cohort_key}');"; then
         # Canary failure is non-fatal but flagged in DB
         sqlite3 "$db" "UPDATE modifications SET status = 'applied-unmonitored' WHERE commit_sha = '${commit_sha}';" 2>/dev/null || true
         echo "WARN: Canary monitoring failed — override active but unmonitored." >&2
     fi
 
-    # 10. Output commit SHA (last line, captured by caller)
+    # 11. Output commit SHA (last line, captured by caller)
     echo "$commit_sha"
 }
 
@@ -1715,6 +1748,7 @@ _interspect_compute_canary_baseline() {
     _interspect_load_confidence
     local before_ts="$1"
     local project="${2:-}"
+    local agent="${3:-}"
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     local min_baseline="${_INTERSPECT_CANARY_MIN_BASELINE:-15}"
     local window_size="${_INTERSPECT_CANARY_WINDOW_USES:-20}"
@@ -1731,9 +1765,25 @@ _interspect_compute_canary_baseline() {
         project_filter="AND project = '${escaped_project}'"
     fi
 
-    # Count available sessions
+    # Build optional agent filter (iv-f7gsz: cohort-scoped baselines)
+    local agent_filter=""
+    local escaped_agent=""
+    if [[ -n "$agent" ]]; then
+        escaped_agent=$(_interspect_sql_escape "$agent")
+        agent_filter="AND source = '${escaped_agent}'"
+    fi
+
+    # When agent-scoped: count sessions that have evidence from this agent
+    # When global: count all sessions (backward compat)
     local session_count
-    session_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM sessions WHERE start_ts < '${escaped_ts}' ${project_filter};")
+    if [[ -n "$agent" ]]; then
+        session_count=$(sqlite3 "$db" "SELECT COUNT(DISTINCT s.session_id) FROM sessions s
+            INNER JOIN evidence e ON e.session_id = s.session_id
+            WHERE s.start_ts < '${escaped_ts}' ${project_filter}
+            AND e.source = '${escaped_agent}';")
+    else
+        session_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM sessions WHERE start_ts < '${escaped_ts}' ${project_filter};")
+    fi
 
     if (( session_count < min_baseline )); then
         echo "null"
@@ -1741,13 +1791,35 @@ _interspect_compute_canary_baseline() {
     fi
 
     # Session IDs in the window (reused subquery)
-    local session_ids_sql="SELECT session_id FROM sessions WHERE start_ts < '${escaped_ts}' ${project_filter} ORDER BY start_ts DESC LIMIT ${window_size}"
+    # Agent-scoped: only sessions where this agent produced evidence
+    local session_ids_sql
+    if [[ -n "$agent" ]]; then
+        session_ids_sql="SELECT DISTINCT s.session_id FROM sessions s
+            INNER JOIN evidence e ON e.session_id = s.session_id
+            WHERE s.start_ts < '${escaped_ts}' ${project_filter}
+            AND e.source = '${escaped_agent}'
+            ORDER BY s.start_ts DESC LIMIT ${window_size}"
+    else
+        session_ids_sql="SELECT session_id FROM sessions WHERE start_ts < '${escaped_ts}' ${project_filter} ORDER BY start_ts DESC LIMIT ${window_size}"
+    fi
 
     # Window boundaries
     local window_start window_end
     window_end="$before_ts"
-    window_start=$(sqlite3 "$db" "SELECT start_ts FROM sessions WHERE start_ts < '${escaped_ts}' ${project_filter} ORDER BY start_ts DESC LIMIT 1 OFFSET $((window_size - 1));" 2>/dev/null)
-    [[ -z "$window_start" ]] && window_start=$(sqlite3 "$db" "SELECT MIN(start_ts) FROM sessions WHERE start_ts < '${escaped_ts}' ${project_filter};")
+    if [[ -n "$agent" ]]; then
+        window_start=$(sqlite3 "$db" "SELECT s.start_ts FROM sessions s
+            INNER JOIN evidence e ON e.session_id = s.session_id
+            WHERE s.start_ts < '${escaped_ts}' ${project_filter}
+            AND e.source = '${escaped_agent}'
+            ORDER BY s.start_ts DESC LIMIT 1 OFFSET $((window_size - 1));" 2>/dev/null)
+        [[ -z "$window_start" ]] && window_start=$(sqlite3 "$db" "SELECT MIN(s.start_ts) FROM sessions s
+            INNER JOIN evidence e ON e.session_id = s.session_id
+            WHERE s.start_ts < '${escaped_ts}' ${project_filter}
+            AND e.source = '${escaped_agent}';")
+    else
+        window_start=$(sqlite3 "$db" "SELECT start_ts FROM sessions WHERE start_ts < '${escaped_ts}' ${project_filter} ORDER BY start_ts DESC LIMIT 1 OFFSET $((window_size - 1));" 2>/dev/null)
+        [[ -z "$window_start" ]] && window_start=$(sqlite3 "$db" "SELECT MIN(start_ts) FROM sessions WHERE start_ts < '${escaped_ts}' ${project_filter};")
+    fi
     # Guard: if window_start is still empty (shouldn't happen given session_count >= min_baseline), bail
     [[ -z "$window_start" ]] && { echo "null"; return 0; }
 
@@ -1759,23 +1831,23 @@ _interspect_compute_canary_baseline() {
         return 0
     fi
 
-    # Override rate: overrides per session
+    # Override rate: overrides per session (agent-scoped when filtering)
     local total_overrides override_rate
-    total_overrides=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event IN ('override', 'disagreement_override') AND session_id IN (${session_ids_sql});")
+    total_overrides=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event IN ('override', 'disagreement_override') ${agent_filter} AND session_id IN (${session_ids_sql});")
     override_rate=$(awk "BEGIN {printf \"%.4f\", ${total_overrides} / ${total_sessions_in_window}}")
 
     # FP rate: agent_wrong / total overrides
     local agent_wrong_count fp_rate
-    agent_wrong_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event IN ('override', 'disagreement_override') AND override_reason = 'agent_wrong' AND session_id IN (${session_ids_sql});")
+    agent_wrong_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event IN ('override', 'disagreement_override') AND override_reason = 'agent_wrong' ${agent_filter} AND session_id IN (${session_ids_sql});")
     if (( total_overrides == 0 )); then
         fp_rate="0.0000"
     else
         fp_rate=$(awk "BEGIN {printf \"%.4f\", ${agent_wrong_count} / ${total_overrides}}")
     fi
 
-    # Finding density: total evidence events per session
+    # Finding density: evidence events per session (agent-scoped when filtering)
     local total_evidence finding_density
-    total_evidence=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id IN (${session_ids_sql});")
+    total_evidence=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id IN (${session_ids_sql}) ${agent_filter};")
     finding_density=$(awk "BEGIN {printf \"%.4f\", ${total_evidence} / ${total_sessions_in_window}}")
 
     # Output as JSON
@@ -1805,36 +1877,55 @@ _interspect_record_canary_sample() {
         return 0
     fi
 
-    # Get active canaries
-    local canary_ids
-    canary_ids=$(sqlite3 "$db" "SELECT id FROM canary WHERE status = 'active';")
-    [[ -z "$canary_ids" ]] && return 0
-
-    # Compute per-session metrics
-    local override_count agent_wrong_count override_rate fp_rate finding_density
-    override_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}' AND event IN ('override', 'disagreement_override');")
-    agent_wrong_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}' AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
-
-    # Override rate: raw count for this session
-    override_rate=$(awk "BEGIN {printf \"%.4f\", ${override_count} + 0}")
-
-    # FP rate: agent_wrong / total overrides (for this session)
-    if (( override_count == 0 )); then
-        fp_rate="0.0000"
-    else
-        fp_rate=$(awk "BEGIN {printf \"%.4f\", ${agent_wrong_count} / ${override_count}}")
-    fi
-
-    # Finding density: total events in this session
-    finding_density=$(awk "BEGIN {printf \"%.4f\", ${event_count} + 0}")
+    # Get active canaries with their agent (group_id)
+    local canary_rows
+    canary_rows=$(sqlite3 -separator '|' "$db" "SELECT id, group_id FROM canary WHERE status = 'active';")
+    [[ -z "$canary_rows" ]] && return 0
 
     local ts
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    # Insert sample for each active canary + increment uses_so_far
-    local canary_id
-    while IFS= read -r canary_id; do
-        [[ -z "$canary_id" ]] && continue
+    # Insert sample for each active canary — agent-scoped (iv-f7gsz)
+    local row canary_id canary_agent
+    while IFS= read -r row; do
+        [[ -z "$row" ]] && continue
+        canary_id="${row%%|*}"
+        canary_agent="${row#*|}"
+
+        # Agent-scoped: skip if session has no evidence from this canary's agent
+        if [[ -n "$canary_agent" ]]; then
+            local escaped_agent
+            escaped_agent=$(_interspect_sql_escape "$canary_agent")
+            local agent_event_count
+            agent_event_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}' AND source = '${escaped_agent}';")
+            if (( agent_event_count == 0 )); then
+                continue  # Session is outside this canary's cohort
+            fi
+
+            # Compute per-session metrics scoped to this agent
+            local override_count agent_wrong_count override_rate fp_rate finding_density
+            override_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}' AND source = '${escaped_agent}' AND event IN ('override', 'disagreement_override');")
+            agent_wrong_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}' AND source = '${escaped_agent}' AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
+            override_rate=$(awk "BEGIN {printf \"%.4f\", ${override_count} + 0}")
+            if (( override_count == 0 )); then
+                fp_rate="0.0000"
+            else
+                fp_rate=$(awk "BEGIN {printf \"%.4f\", ${agent_wrong_count} / ${override_count}}")
+            fi
+            finding_density=$(awk "BEGIN {printf \"%.4f\", ${agent_event_count} + 0}")
+        else
+            # Legacy canary without group_id: global metrics (backward compat)
+            local override_count agent_wrong_count override_rate fp_rate finding_density
+            override_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}' AND event IN ('override', 'disagreement_override');")
+            agent_wrong_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}' AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
+            override_rate=$(awk "BEGIN {printf \"%.4f\", ${override_count} + 0}")
+            if (( override_count == 0 )); then
+                fp_rate="0.0000"
+            else
+                fp_rate=$(awk "BEGIN {printf \"%.4f\", ${agent_wrong_count} / ${override_count}}")
+            fi
+            finding_density=$(awk "BEGIN {printf \"%.4f\", ${event_count} + 0}")
+        fi
 
         # Dedup: INSERT OR IGNORE + conditional increment in single transaction (review P1: TOCTOU fix)
         # changes() must be checked in same sqlite3 invocation as the INSERT
@@ -1843,8 +1934,44 @@ _interspect_record_canary_sample() {
                 VALUES (${canary_id}, '${escaped_sid}', '${ts}', ${override_rate}, ${fp_rate}, ${finding_density});
             UPDATE canary SET uses_so_far = uses_so_far + 1 WHERE id = ${canary_id} AND changes() > 0;
         " 2>/dev/null || true
-    done <<< "$canary_ids"
+    done <<< "$canary_rows"
 
+    return 0
+}
+
+# Check for overlapping active canaries before creating a new one (iv-f7gsz).
+# Same agent + active canary → BLOCK (cannot attribute effect).
+# Different agent, same project → WARN (advisory, not blocking).
+# Args: $1=agent, $2=project (optional)
+# Output: "OK", "WARN|reason", or "BLOCK|reason"
+# Returns: 0 on OK/WARN, 1 on BLOCK
+_interspect_check_canary_overlap() {
+    local agent="$1"
+    local project="${2:-}"
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+
+    local escaped_agent
+    escaped_agent=$(_interspect_sql_escape "$agent")
+
+    # Check 1: Same agent already has active canary → BLOCK
+    local same_agent_id
+    same_agent_id=$(sqlite3 "$db" "SELECT id FROM canary WHERE group_id = '${escaped_agent}' AND status = 'active' LIMIT 1;" 2>/dev/null)
+    if [[ -n "$same_agent_id" ]]; then
+        echo "BLOCK|Canary #${same_agent_id} already active for ${agent}. Resolve or revert it before applying a new override."
+        return 1
+    fi
+
+    # Check 2: Different agent in overlapping scope → WARN (advisory)
+    local other_count
+    other_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM canary WHERE status = 'active' AND group_id != '${escaped_agent}';" 2>/dev/null)
+    if (( other_count > 0 )); then
+        local other_agents
+        other_agents=$(sqlite3 "$db" "SELECT DISTINCT group_id FROM canary WHERE status = 'active' AND group_id != '${escaped_agent}';" 2>/dev/null)
+        echo "WARN|${other_count} other canary(ies) active (${other_agents//$'\n'/, }). Verdicts may have reduced confidence."
+        return 0
+    fi
+
+    echo "OK"
     return 0
 }
 
@@ -1974,18 +2101,32 @@ _interspect_evaluate_canary() {
     escaped_verdict_reason=$(_interspect_sql_escape "$verdict_reason")
     sqlite3 "$db" "UPDATE canary SET status = '${verdict}', verdict_reason = '${escaped_verdict_reason}' WHERE id = ${canary_id};"
 
-    # Check for multiple active canaries (confounding note)
-    local active_count
+    # Check for multiple active canaries — list specific agents (iv-f7gsz)
+    local active_count overlap_note=""
     active_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM canary WHERE status = 'active' AND id != ${canary_id};")
     if (( active_count > 0 )); then
-        verdict_reason="${verdict_reason} Note: ${active_count} other override(s) active during monitoring — individual impact unclear."
+        local overlap_agents
+        overlap_agents=$(sqlite3 "$db" "SELECT DISTINCT group_id FROM canary WHERE status = 'active' AND id != ${canary_id};")
+        overlap_note=" Note: ${active_count} other canary(ies) active (${overlap_agents//$'\n'/, }) — verdicts may have reduced confidence."
+        verdict_reason="${verdict_reason}${overlap_note}"
     fi
+
+    # Cohort context (iv-f7gsz)
+    local cohort_key
+    cohort_key=$(sqlite3 "$db" "SELECT COALESCE(cohort_key, '') FROM canary WHERE id = ${canary_id};" 2>/dev/null)
+    [[ -z "$cohort_key" ]] && cohort_key="${agent}:*"
+
+    # Matched session ratio: how many of total sessions had evidence from this agent
+    local total_sessions matched_sessions
+    total_sessions=$(sqlite3 "$db" "SELECT COUNT(*) FROM canary_samples WHERE canary_id = ${canary_id};")
+    matched_sessions="$sample_count"  # all samples are now agent-matched (or legacy global)
 
     jq -n \
         --argjson canary_id "$canary_id" \
         --arg agent "$agent" \
         --arg status "$verdict" \
         --arg reason "$verdict_reason" \
+        --arg cohort_key "$cohort_key" \
         --argjson baseline_or "$b_or" \
         --argjson baseline_fp "$b_fp" \
         --argjson baseline_fd "$b_fd" \
@@ -1993,7 +2134,7 @@ _interspect_evaluate_canary() {
         --argjson current_fp "$avg_fp" \
         --argjson current_fd "$avg_fd" \
         --argjson sample_count "$sample_count" \
-        '{canary_id:$canary_id,agent:$agent,status:$status,reason:$reason,metrics:{baseline:{override_rate:$baseline_or,fp_rate:$baseline_fp,finding_density:$baseline_fd},current:{override_rate:$current_or,fp_rate:$current_fp,finding_density:$current_fd}},sample_count:$sample_count}'
+        '{canary_id:$canary_id,agent:$agent,status:$status,reason:$reason,cohort_key:$cohort_key,metrics:{baseline:{override_rate:$baseline_or,fp_rate:$baseline_fp,finding_density:$baseline_fd},current:{override_rate:$current_or,fp_rate:$current_fp,finding_density:$current_fd}},sample_count:$sample_count}'
 }
 
 # Check all active canaries and evaluate those whose window has completed.
@@ -2925,9 +3066,22 @@ _interspect_write_overlay_locked() {
     # Disable set -e for canary setup — git commit already succeeded, so overlay
     # is active. Canary failure should warn, not abort (C-02 fix).
     set +e
+
+    # Overlap check (iv-f7gsz) — advisory only for overlays (git commit already done)
+    local overlap_result
+    overlap_result=$(_interspect_check_canary_overlap "$group_id" "" 2>/dev/null) || true
+    case "${overlap_result%%|*}" in
+        BLOCK)
+            echo "WARN: ${overlap_result#*|} (overlay already committed, canary will have reduced confidence)" >&2
+            ;;
+        WARN)
+            echo "WARN: ${overlap_result#*|}" >&2
+            ;;
+    esac
+
     _interspect_load_confidence 2>/dev/null
     local baseline_json
-    baseline_json=$(_interspect_compute_canary_baseline "$ts" "" 2>/dev/null || echo "null")
+    baseline_json=$(_interspect_compute_canary_baseline "$ts" "" "$agent" 2>/dev/null || echo "null")
 
     local b_override_rate b_fp_rate b_finding_density b_window
     if [[ "$baseline_json" != "null" ]]; then
@@ -2959,8 +3113,9 @@ _interspect_write_overlay_locked() {
         baseline_values="${b_override_rate}, ${b_fp_rate}, ${b_finding_density}, '${escaped_bwindow}'"
     fi
 
-    if ! sqlite3 "$db" "INSERT INTO canary (file, commit_sha, group_id, applied_at, window_uses, window_expires_at, baseline_override_rate, baseline_fp_rate, baseline_finding_density, baseline_window, status)
-        VALUES ('$(_interspect_sql_escape "$rel_path")', '${commit_sha}', '${group_id}', '${ts}', ${_INTERSPECT_CANARY_WINDOW_USES:-20}, '${expires_at}', ${baseline_values}, 'active');"; then
+    local cohort_key="${group_id}:*"
+    if ! sqlite3 "$db" "INSERT INTO canary (file, commit_sha, group_id, applied_at, window_uses, window_expires_at, baseline_override_rate, baseline_fp_rate, baseline_finding_density, baseline_window, status, project, cohort_key)
+        VALUES ('$(_interspect_sql_escape "$rel_path")', '${commit_sha}', '${group_id}', '${ts}', ${_INTERSPECT_CANARY_WINDOW_USES:-20}, '${expires_at}', ${baseline_values}, 'active', '', '${cohort_key}');"; then
         sqlite3 "$db" "UPDATE modifications SET status = 'applied-unmonitored' WHERE commit_sha = '${commit_sha}';" 2>/dev/null || true
         echo "WARN: Canary monitoring failed — overlay active but unmonitored." >&2
     fi
