@@ -1045,51 +1045,8 @@ _interspect_apply_override_locked() {
         sqlite3 "$db" "INSERT INTO modifications (group_id, ts, tier, mod_type, target_file, commit_sha, confidence, evidence_summary, status)
             VALUES ('${escaped_agent}', '${ts}', 'persistent', 'routing', '${filepath}', '${commit_sha}', ${confidence}, '${escaped_reason}', 'applied');"
 
-        # Canary record — compute baseline BEFORE insert, agent-scoped (iv-f7gsz)
-        # (_interspect_load_confidence already called in step 3 above)
-        local baseline_json
-        baseline_json=$(_interspect_compute_canary_baseline "$ts" "" "$agent" 2>/dev/null || echo "null")
-
-        local b_override_rate b_fp_rate b_finding_density b_window
-        if [[ "$baseline_json" != "null" ]]; then
-            b_override_rate=$(echo "$baseline_json" | jq -r '.override_rate')
-            b_fp_rate=$(echo "$baseline_json" | jq -r '.fp_rate')
-            b_finding_density=$(echo "$baseline_json" | jq -r '.finding_density')
-            b_window=$(echo "$baseline_json" | jq -r '.window')
-        else
-            b_override_rate="NULL"
-            b_fp_rate="NULL"
-            b_finding_density="NULL"
-            b_window="NULL"
-        fi
-
-        local expires_at
-        expires_at=$(date -u -d "+${_INTERSPECT_CANARY_WINDOW_DAYS:-14} days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-            || date -u -v+"${_INTERSPECT_CANARY_WINDOW_DAYS:-14}"d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
-        if [[ -z "$expires_at" ]]; then
-            echo "ERROR: date command does not support relative dates" >&2
-            return 1
-        fi
-
-        # Build INSERT with conditional NULLs for baseline
-        local baseline_values
-        if [[ "$b_override_rate" == "NULL" ]]; then
-            baseline_values="NULL, NULL, NULL, NULL"
-        else
-            local escaped_bwindow
-            escaped_bwindow=$(_interspect_sql_escape "$b_window")
-            baseline_values="${b_override_rate}, ${b_fp_rate}, ${b_finding_density}, '${escaped_bwindow}'"
-        fi
-
-        local cohort_key="${agent}:*"
-        local escaped_cohort_key
-        escaped_cohort_key=$(_interspect_sql_escape "$cohort_key")
-        if ! sqlite3 "$db" "INSERT INTO canary (file, commit_sha, group_id, applied_at, window_uses, window_expires_at, baseline_override_rate, baseline_fp_rate, baseline_finding_density, baseline_window, status, project, cohort_key)
-            VALUES ('${filepath}', '${commit_sha}', '${escaped_agent}', '${ts}', ${_INTERSPECT_CANARY_WINDOW_USES:-20}, '${expires_at}', ${baseline_values}, 'active', '', '${escaped_cohort_key}');"; then
-            # Canary failure is non-fatal but flagged in DB
-            sqlite3 "$db" "UPDATE modifications SET status = 'applied-unmonitored' WHERE commit_sha = '${commit_sha}';" 2>/dev/null || true
-            echo "WARN: Canary monitoring failed — override active but unmonitored." >&2
-        fi
+        # Canary record — baseline + INSERT (iv-f7gsz: agent-scoped)
+        _interspect_create_canary_record "$db" "$filepath" "$escaped_agent" "$commit_sha" "$ts" "$agent" "$agent"
     else
         echo "INFO: Metadata updated for existing override. No new canary." >&2
     fi
@@ -1461,50 +1418,8 @@ _interspect_approve_override_locked() {
             ;;
     esac
 
-    # 10. Canary record — compute baseline BEFORE insert, agent-scoped (iv-f7gsz)
-    local baseline_json
-    baseline_json=$(_interspect_compute_canary_baseline "$ts" "" "$agent" 2>/dev/null || echo "null")
-
-    local b_override_rate b_fp_rate b_finding_density b_window
-    if [[ "$baseline_json" != "null" ]]; then
-        b_override_rate=$(echo "$baseline_json" | jq -r '.override_rate')
-        b_fp_rate=$(echo "$baseline_json" | jq -r '.fp_rate')
-        b_finding_density=$(echo "$baseline_json" | jq -r '.finding_density')
-        b_window=$(echo "$baseline_json" | jq -r '.window')
-    else
-        b_override_rate="NULL"
-        b_fp_rate="NULL"
-        b_finding_density="NULL"
-        b_window="NULL"
-    fi
-
-    local expires_at
-    expires_at=$(date -u -d "+${_INTERSPECT_CANARY_WINDOW_DAYS:-14} days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-        || date -u -v+"${_INTERSPECT_CANARY_WINDOW_DAYS:-14}"d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
-    if [[ -z "$expires_at" ]]; then
-        echo "ERROR: date command does not support relative dates" >&2
-        return 1
-    fi
-
-    # Build INSERT with conditional NULLs for baseline
-    local baseline_values
-    if [[ "$b_override_rate" == "NULL" ]]; then
-        baseline_values="NULL, NULL, NULL, NULL"
-    else
-        local escaped_bwindow
-        escaped_bwindow=$(_interspect_sql_escape "$b_window")
-        baseline_values="${b_override_rate}, ${b_fp_rate}, ${b_finding_density}, '${escaped_bwindow}'"
-    fi
-
-    local cohort_key="${agent}:*"
-    local escaped_cohort_key
-    escaped_cohort_key=$(_interspect_sql_escape "$cohort_key")
-    if ! sqlite3 "$db" "INSERT INTO canary (file, commit_sha, group_id, applied_at, window_uses, window_expires_at, baseline_override_rate, baseline_fp_rate, baseline_finding_density, baseline_window, status, project, cohort_key)
-        VALUES ('${escaped_filepath}', '${commit_sha}', '${escaped_agent}', '${ts}', ${_INTERSPECT_CANARY_WINDOW_USES:-20}, '${expires_at}', ${baseline_values}, 'active', '', '${escaped_cohort_key}');"; then
-        # Canary failure is non-fatal but flagged in DB
-        sqlite3 "$db" "UPDATE modifications SET status = 'applied-unmonitored' WHERE commit_sha = '${commit_sha}';" 2>/dev/null || true
-        echo "WARN: Canary monitoring failed — override active but unmonitored." >&2
-    fi
+    # 10. Canary record — baseline + INSERT (iv-f7gsz: agent-scoped)
+    _interspect_create_canary_record "$db" "$escaped_filepath" "$escaped_agent" "$commit_sha" "$ts" "$agent" "$agent"
 
     # 11. Output commit SHA (last line, captured by caller)
     echo "$commit_sha"
@@ -1752,6 +1667,63 @@ _interspect_should_auto_apply() {
 }
 
 # ─── Canary Monitoring ──────────────────────────────────────────────────────
+
+# Create a canary record with baseline computation and INSERT.
+# Consolidates the duplicated canary-creation block across override apply,
+# promote, and overlay sites.
+# Args: $1=db, $2=escaped_filepath, $3=escaped_group_id, $4=commit_sha,
+#       $5=ts, $6=agent (for baseline scoping), $7=cohort_key_source (for cohort_key)
+# Output: nothing on success; WARN on failure (non-fatal)
+# Returns: 0 always (canary failure is non-fatal)
+_interspect_create_canary_record() {
+    local db="$1" escaped_filepath="$2" escaped_group_id="$3" commit_sha="$4"
+    local ts="$5" agent="$6" cohort_key_source="$7"
+
+    local baseline_json
+    baseline_json=$(_interspect_compute_canary_baseline "$ts" "" "$agent" 2>/dev/null || echo "null")
+
+    local b_override_rate b_fp_rate b_finding_density b_window
+    if [[ "$baseline_json" != "null" ]]; then
+        b_override_rate=$(echo "$baseline_json" | jq -r '.override_rate')
+        b_fp_rate=$(echo "$baseline_json" | jq -r '.fp_rate')
+        b_finding_density=$(echo "$baseline_json" | jq -r '.finding_density')
+        b_window=$(echo "$baseline_json" | jq -r '.window')
+    else
+        b_override_rate="NULL"
+        b_fp_rate="NULL"
+        b_finding_density="NULL"
+        b_window="NULL"
+    fi
+
+    local expires_at
+    expires_at=$(date -u -d "+${_INTERSPECT_CANARY_WINDOW_DAYS:-14} days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || date -u -v+"${_INTERSPECT_CANARY_WINDOW_DAYS:-14}"d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+    if [[ -z "$expires_at" ]]; then
+        echo "WARN: Cannot compute canary expiry — date command does not support relative dates" >&2
+        return 0
+    fi
+
+    local baseline_values
+    if [[ "$b_override_rate" == "NULL" ]]; then
+        baseline_values="NULL, NULL, NULL, NULL"
+    else
+        local escaped_bwindow
+        escaped_bwindow=$(_interspect_sql_escape "$b_window")
+        baseline_values="${b_override_rate}, ${b_fp_rate}, ${b_finding_density}, '${escaped_bwindow}'"
+    fi
+
+    local cohort_key="${cohort_key_source}:*"
+    local escaped_cohort_key
+    escaped_cohort_key=$(_interspect_sql_escape "$cohort_key")
+
+    if ! sqlite3 "$db" "INSERT INTO canary (file, commit_sha, group_id, applied_at, window_uses, window_expires_at, baseline_override_rate, baseline_fp_rate, baseline_finding_density, baseline_window, status, project, cohort_key)
+        VALUES ('${escaped_filepath}', '${commit_sha}', '${escaped_group_id}', '${ts}', ${_INTERSPECT_CANARY_WINDOW_USES:-20}, '${expires_at}', ${baseline_values}, 'active', '', '${escaped_cohort_key}');"; then
+        sqlite3 "$db" "UPDATE modifications SET status = 'applied-unmonitored' WHERE commit_sha = '${commit_sha}';" 2>/dev/null || true
+        echo "WARN: Canary monitoring failed — active but unmonitored." >&2
+    fi
+
+    return 0
+}
 
 # Compute canary baseline metrics from historical evidence.
 # Uses the last N sessions (configurable) before a given timestamp.
@@ -3104,48 +3076,9 @@ _interspect_write_overlay_locked() {
             ;;
     esac
 
+    # Canary record — baseline + INSERT (iv-f7gsz: agent-scoped baseline, compound group_id)
     _interspect_load_confidence 2>/dev/null
-    local baseline_json
-    baseline_json=$(_interspect_compute_canary_baseline "$ts" "" "$agent" 2>/dev/null || echo "null")
-
-    local b_override_rate b_fp_rate b_finding_density b_window
-    if [[ "$baseline_json" != "null" ]]; then
-        b_override_rate=$(echo "$baseline_json" | jq -r '.override_rate')
-        b_fp_rate=$(echo "$baseline_json" | jq -r '.fp_rate')
-        b_finding_density=$(echo "$baseline_json" | jq -r '.finding_density')
-        b_window=$(echo "$baseline_json" | jq -r '.window')
-    else
-        b_override_rate="NULL"
-        b_fp_rate="NULL"
-        b_finding_density="NULL"
-        b_window="NULL"
-    fi
-
-    local expires_at
-    expires_at=$(date -u -d "+${_INTERSPECT_CANARY_WINDOW_DAYS:-14} days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-        || date -u -v+"${_INTERSPECT_CANARY_WINDOW_DAYS:-14}"d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
-    if [[ -z "$expires_at" ]]; then
-        echo "ERROR: date command does not support relative dates" >&2
-        return 1
-    fi
-
-    local baseline_values
-    if [[ "$b_override_rate" == "NULL" ]]; then
-        baseline_values="NULL, NULL, NULL, NULL"
-    else
-        local escaped_bwindow
-        escaped_bwindow=$(_interspect_sql_escape "$b_window")
-        baseline_values="${b_override_rate}, ${b_fp_rate}, ${b_finding_density}, '${escaped_bwindow}'"
-    fi
-
-    local cohort_key="${group_id}:*"
-    local escaped_cohort_key
-    escaped_cohort_key=$(_interspect_sql_escape "$cohort_key")
-    if ! sqlite3 "$db" "INSERT INTO canary (file, commit_sha, group_id, applied_at, window_uses, window_expires_at, baseline_override_rate, baseline_fp_rate, baseline_finding_density, baseline_window, status, project, cohort_key)
-        VALUES ('$(_interspect_sql_escape "$rel_path")', '${commit_sha}', '${group_id}', '${ts}', ${_INTERSPECT_CANARY_WINDOW_USES:-20}, '${expires_at}', ${baseline_values}, 'active', '', '${escaped_cohort_key}');"; then
-        sqlite3 "$db" "UPDATE modifications SET status = 'applied-unmonitored' WHERE commit_sha = '${commit_sha}';" 2>/dev/null || true
-        echo "WARN: Canary monitoring failed — overlay active but unmonitored." >&2
-    fi
+    _interspect_create_canary_record "$db" "$(_interspect_sql_escape "$rel_path")" "$group_id" "$commit_sha" "$ts" "$agent" "$group_id"
 
     echo "$commit_sha"
 }
