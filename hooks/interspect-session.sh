@@ -61,14 +61,44 @@ _interspect_consume_kernel_events "$SESSION_ID" 2>/dev/null || true
 # Check for canary alerts — evaluate completed canaries first
 _interspect_check_canaries >/dev/null 2>&1 || true
 
-# If any canaries are in alert state, inject warning into session context
-ALERT_COUNT=$(sqlite3 "$_INTERSPECT_DB" "SELECT COUNT(*) FROM canary WHERE status = 'alert';" 2>/dev/null || echo "0")
+# Build session-start summary (iv-m6cd): active overrides + canary alerts
+SUMMARY_PARTS=()
 
+# Active routing overrides
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+OVERRIDES_FILE="${ROOT}/${FLUX_ROUTING_OVERRIDES_PATH:-.claude/routing-overrides.json}"
+if [[ -f "$OVERRIDES_FILE" ]]; then
+    OVERRIDE_COUNT=$(jq '[.overrides[] | select(.action == "exclude")] | length' "$OVERRIDES_FILE" 2>/dev/null || echo "0")
+    PROPOSE_COUNT=$(jq '[.overrides[] | select(.action == "propose")] | length' "$OVERRIDES_FILE" 2>/dev/null || echo "0")
+    if (( OVERRIDE_COUNT > 0 )); then
+        EXCLUDED_AGENTS=$(jq -r '[.overrides[] | select(.action == "exclude") | .agent] | join(", ")' "$OVERRIDES_FILE" 2>/dev/null || echo "")
+        SUMMARY_PARTS+=("Interspect: ${OVERRIDE_COUNT} active exclusion(s): ${EXCLUDED_AGENTS}")
+    fi
+    if (( PROPOSE_COUNT > 0 )); then
+        PROPOSED_AGENTS=$(jq -r '[.overrides[] | select(.action == "propose") | .agent] | join(", ")' "$OVERRIDES_FILE" 2>/dev/null || echo "")
+        SUMMARY_PARTS+=("Interspect: ${PROPOSE_COUNT} pending proposal(s): ${PROPOSED_AGENTS}. Run /interspect:approve <agent> to apply.")
+    fi
+fi
+
+# Evidence stats
+EVIDENCE_COUNT=$(sqlite3 "$_INTERSPECT_DB" "SELECT COUNT(*) FROM evidence;" 2>/dev/null || echo "0")
+SESSION_COUNT=$(sqlite3 "$_INTERSPECT_DB" "SELECT COUNT(*) FROM sessions;" 2>/dev/null || echo "0")
+if (( EVIDENCE_COUNT > 0 )); then
+    SUMMARY_PARTS+=("Interspect: ${EVIDENCE_COUNT} evidence events across ${SESSION_COUNT} sessions.")
+fi
+
+# Canary alerts (highest priority — shown last so it's the final thing read)
+ALERT_COUNT=$(sqlite3 "$_INTERSPECT_DB" "SELECT COUNT(*) FROM canary WHERE status = 'alert';" 2>/dev/null || echo "0")
 if (( ALERT_COUNT > 0 )); then
     ALERT_AGENTS=$(sqlite3 -separator ', ' "$_INTERSPECT_DB" "SELECT group_id FROM canary WHERE status = 'alert';" 2>/dev/null || echo "")
-    ALERT_MSG="WARNING: Canary alert: routing override(s) for ${ALERT_AGENTS} may have degraded review quality. Run /interspect:status for details or /interspect:revert <agent> to undo."
-    # Output as additionalContext JSON for session-start injection (safe via jq — prevents JSON injection from agent names)
-    jq -n --arg ctx "$ALERT_MSG" '{"additionalContext":$ctx}'
+    SUMMARY_PARTS+=("WARNING: Canary alert for ${ALERT_AGENTS} — review quality may have degraded. Run /interspect:status or /interspect:revert <agent>.")
+fi
+
+# Emit summary as additionalContext if there's anything to report
+if (( ${#SUMMARY_PARTS[@]} > 0 )); then
+    # Join parts with newlines (safe via jq)
+    SUMMARY=$(printf '%s\n' "${SUMMARY_PARTS[@]}")
+    jq -n --arg ctx "$SUMMARY" '{"additionalContext":$ctx}'
 fi
 
 exit 0

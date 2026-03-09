@@ -21,6 +21,9 @@
 #   _interspect_get_overlay_eligible — agents eligible for overlay proposals (ready + 40-79% wrong)
 #   _interspect_is_cross_cutting — check if agent is structural/cross-cutting
 #   _interspect_apply_propose — write "propose" entry to routing-overrides.json
+#   _interspect_rate_limit_exceeded — check global modification rate limit (iv-003t)
+#   _interspect_same_session_proposed — check if current session proposed the override (iv-drgo)
+#   _interspect_reset          — wipe evidence/canary/modifications data (iv-g0to)
 #   _interspect_flock_git     — serialized git operations via flock
 #   _interspect_compute_delegation_stats — per-category delegation pass rates (B4)
 #   _interspect_write_delegation_calibration — write delegation-calibration.json (B4)
@@ -388,6 +391,9 @@ _interspect_load_confidence() {
     # Circuit breaker: max reverts before disabling autonomy for a target
     _INTERSPECT_CIRCUIT_BREAKER_MAX=3
     _INTERSPECT_CIRCUIT_BREAKER_DAYS=30
+    # Rate limiter (iv-003t): max modifications per rolling window
+    _INTERSPECT_RATE_LIMIT_MAX=5
+    _INTERSPECT_RATE_LIMIT_HOURS=24
 
     if [[ -f "$conf" ]]; then
         _INTERSPECT_MIN_SESSIONS=$(jq -r '.min_sessions // 3' "$conf")
@@ -410,6 +416,10 @@ _interspect_load_confidence() {
         # Circuit breaker thresholds (F6)
         _INTERSPECT_CIRCUIT_BREAKER_MAX=$(jq -r '.circuit_breaker_max // 3' "$conf")
         _INTERSPECT_CIRCUIT_BREAKER_DAYS=$(jq -r '.circuit_breaker_days // 30' "$conf")
+
+        # Rate limiter (iv-003t)
+        _INTERSPECT_RATE_LIMIT_MAX=$(jq -r '.rate_limit_max // 5' "$conf")
+        _INTERSPECT_RATE_LIMIT_HOURS=$(jq -r '.rate_limit_hours // 24' "$conf")
     fi
 
     # Bounds-check canary config (review P0-3: prevent unbounded SQL LIMIT values)
@@ -433,6 +443,10 @@ _interspect_load_confidence() {
     # Circuit breaker bounds (F6)
     _INTERSPECT_CIRCUIT_BREAKER_MAX=$(_interspect_clamp_int "${_INTERSPECT_CIRCUIT_BREAKER_MAX:-3}" 1 100 3)
     _INTERSPECT_CIRCUIT_BREAKER_DAYS=$(_interspect_clamp_int "${_INTERSPECT_CIRCUIT_BREAKER_DAYS:-30}" 1 365 30)
+
+    # Rate limiter bounds (iv-003t)
+    _INTERSPECT_RATE_LIMIT_MAX=$(_interspect_clamp_int "${_INTERSPECT_RATE_LIMIT_MAX:-5}" 1 50 5)
+    _INTERSPECT_RATE_LIMIT_HOURS=$(_interspect_clamp_int "${_INTERSPECT_RATE_LIMIT_HOURS:-24}" 1 168 24)
 }
 
 # Classify a pattern. Args: $1=event_count $2=session_count $3=project_count
@@ -1251,12 +1265,18 @@ _interspect_approve_override() {
         return 1
     fi
 
+    # --- Privilege separation (iv-drgo): block same-session approve ---
+    if _interspect_same_session_proposed "$agent"; then
+        echo "WARNING: This session proposed the override for ${agent}. Approving your own proposal is allowed but noted for audit." >&2
+        echo "For stronger separation, approve from a different session." >&2
+    fi
+
     # --- Write commit message to temp file (avoids shell injection) ---
 
     local commit_msg_file
     commit_msg_file=$(mktemp)
-    printf '[interspect] Approve: exclude %s from flux-drive triage\n\nPromoted from proposal to active exclusion.\nAgent: %s\n' \
-        "$agent" "$agent" > "$commit_msg_file"
+    printf '[interspect] Approve: exclude %s from flux-drive triage\n\nPromoted from proposal to active exclusion.\nAgent: %s\nApproved-by: %s\n' \
+        "$agent" "$agent" "${CLAUDE_SESSION_ID:-unknown}" > "$commit_msg_file"
 
     # --- DB path for use inside flock ---
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
@@ -1628,6 +1648,48 @@ _interspect_circuit_breaker_tripped() {
     (( revert_count >= max_reverts ))
 }
 
+# ─── Rate Limiter (iv-003t) ──────────────────────────────────────────────────
+
+# Check global modification rate limit: too many modifications in rolling window?
+# Prevents runaway autonomous modifications by capping total changes system-wide.
+# Returns: 0 if rate limit EXCEEDED (should block), 1 if clear
+_interspect_rate_limit_exceeded() {
+    _interspect_load_confidence
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    local max_mods="${_INTERSPECT_RATE_LIMIT_MAX:-5}"
+    local hours="${_INTERSPECT_RATE_LIMIT_HOURS:-24}"
+
+    local mod_count
+    mod_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM modifications WHERE status IN ('applied', 'proposed') AND ts > datetime('now', '-${hours} hours');" 2>/dev/null || echo "0")
+
+    (( mod_count >= max_mods ))
+}
+
+# ─── Privilege Separation (iv-drgo) ──────────────────────────────────────────
+
+# Check if current session proposed the override (same-session approve is blocked).
+# Proposals should be reviewed by a different session to prevent self-approval.
+# Args: $1=agent_name
+# Returns: 0 if same-session (should block), 1 if different session (clear)
+_interspect_same_session_proposed() {
+    local agent="$1"
+    local current_session="${CLAUDE_SESSION_ID:-}"
+    [[ -z "$current_session" ]] && return 1  # No session ID → can't check, allow
+
+    local root
+    root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    local filepath="${FLUX_ROUTING_OVERRIDES_PATH:-.claude/routing-overrides.json}"
+    local fullpath="${root}/${filepath}"
+    [[ -f "$fullpath" ]] || return 1
+
+    local proposer
+    proposer=$(jq -r --arg agent "$agent" \
+        '.overrides[] | select(.agent == $agent and .action == "propose") | .created_by // ""' \
+        "$fullpath" 2>/dev/null) || return 1
+
+    [[ "$proposer" == "$current_session" ]]
+}
+
 # Check if an override should auto-apply (autonomy mode + safety checks).
 # This is the gateway function called by propose flow to decide propose vs apply.
 # Args: $1=agent_name $2=mod_type ("routing" or "prompt_tuning")
@@ -1645,6 +1707,12 @@ _interspect_should_auto_apply() {
     # Type 1-2 (routing, overlays with routing effect) can auto-apply
     # Per design: overlays are "always_propose" in protected-paths.json
     if [[ "$mod_type" == "prompt_tuning" ]]; then
+        return 1
+    fi
+
+    # Rate limiter (iv-003t): too many modifications globally → force propose
+    if _interspect_rate_limit_exceeded; then
+        echo "INFO: Rate limit exceeded (${_INTERSPECT_RATE_LIMIT_MAX} mods/${_INTERSPECT_RATE_LIMIT_HOURS}h) — forcing propose mode." >&2
         return 1
     fi
 
@@ -1668,6 +1736,45 @@ _interspect_should_auto_apply() {
         echo "INFO: Insufficient baseline for ${agent} (${session_count}/${min_baseline} sessions) — forcing propose mode." >&2
         return 1
     fi
+
+    return 0
+}
+
+# ─── Reset (iv-g0to) ─────────────────────────────────────────────────────────
+
+# Reset interspect state: wipe evidence, modifications, canary tables.
+# Preserves the sessions table and confidence.json (human-owned config).
+# Does NOT touch routing-overrides.json — use /interspect:revert for that.
+# Args: $1=scope ("evidence"|"canary"|"modifications"|"all")
+# Returns: 0 on success, 1 on failure
+_interspect_reset() {
+    local scope="${1:-all}"
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || { echo "ERROR: No interspect database found." >&2; return 1; }
+
+    case "$scope" in
+        evidence)
+            sqlite3 "$db" "DELETE FROM evidence;" 2>/dev/null || return 1
+            echo "Reset: evidence table cleared."
+            ;;
+        canary)
+            sqlite3 "$db" "DELETE FROM canary; DELETE FROM canary_samples;" 2>/dev/null || return 1
+            echo "Reset: canary tables cleared."
+            ;;
+        modifications)
+            sqlite3 "$db" "DELETE FROM modifications;" 2>/dev/null || return 1
+            echo "Reset: modifications table cleared."
+            ;;
+        all)
+            sqlite3 "$db" "DELETE FROM evidence; DELETE FROM canary; DELETE FROM canary_samples; DELETE FROM modifications;" 2>/dev/null || return 1
+            echo "Reset: all interspect data cleared (evidence, canary, modifications)."
+            echo "Preserved: sessions table, confidence.json, routing-overrides.json."
+            ;;
+        *)
+            echo "ERROR: Unknown reset scope '${scope}'. Use: evidence, canary, modifications, all." >&2
+            return 1
+            ;;
+    esac
 
     return 0
 }

@@ -4,7 +4,7 @@
 
 ## Overview
 
-Agent performance profiler and routing optimizer — 0 skills, 12 commands, 0 agents, 3 hooks, 0 MCP servers. Companion plugin for Clavain. Collects evidence about flux-drive agent accuracy, proposes routing overrides, and monitors canary periods.
+Agent performance profiler and routing optimizer — 0 skills, 14 commands, 0 agents, 3 hooks, 0 MCP servers. Companion plugin for Clavain. Collects evidence about flux-drive agent accuracy, proposes routing overrides, and monitors canary periods.
 
 ## Quick Commands
 
@@ -13,7 +13,7 @@ Agent performance profiler and routing optimizer — 0 skills, 12 commands, 0 ag
 claude --plugin-dir /home/mk/projects/Demarch/interverse/interspect
 
 # Validate structure
-ls commands/*.md | wc -l              # Should be 12
+ls commands/*.md | wc -l              # Should be 14
 bash -n hooks/lib-interspect.sh       # Syntax check
 python3 -c "import json; json.load(open('.claude-plugin/plugin.json'))"  # Manifest check
 python3 -c "import json; json.load(open('hooks/hooks.json'))"           # Hooks JSON check
