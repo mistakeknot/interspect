@@ -138,8 +138,15 @@ echo ""
 
 # ─── Routing Mode ─────────────────────────────────────────────────────────────
 
-ROUTING_YAML="${ROOT}/os/clavain/config/routing.yaml"
-if [[ -f "$ROUTING_YAML" ]]; then
+# Try plugin cache first, then common monorepo locations
+ROUTING_YAML=""
+for _candidate in \
+    "$(find ~/.claude/plugins/cache -path '*/clavain/*/config/routing.yaml' 2>/dev/null | head -1)" \
+    "${ROOT}/os/clavain/config/routing.yaml" \
+    "${ROOT}/config/routing.yaml"; do
+    [[ -f "$_candidate" ]] && ROUTING_YAML="$_candidate" && break
+done
+if [[ -n "$ROUTING_YAML" && -f "$ROUTING_YAML" ]]; then
     DELEG_MODE=$(grep -E '^\s*delegation\s*:' "$ROUTING_YAML" | head -1)
     if [[ -z "$DELEG_MODE" ]]; then
         # Try nested: delegation:\n  mode:

@@ -13,9 +13,12 @@ Existing overrides are not affected — they remain active with their canary mon
 ## Locate Library
 
 ```bash
-INTERSPECT_LIB=$(find ~/.claude/plugins/cache -path '*/clavain/*/hooks/lib-interspect.sh' 2>/dev/null | head -1)
-[[ -z "$INTERSPECT_LIB" ]] && INTERSPECT_LIB=$(find ~/projects -path '*/os/clavain/hooks/lib-interspect.sh' 2>/dev/null | head -1)
-if [[ -z "$INTERSPECT_LIB" ]]; then
+# Prefer own copy, fall back to Clavain cache, then monorepo dev path
+INTERSPECT_LIB="${CLAUDE_PLUGIN_ROOT}/hooks/lib-interspect.sh"
+if [[ ! -f "$INTERSPECT_LIB" ]]; then
+    INTERSPECT_LIB=$(find ~/.claude/plugins/cache -path '*/interspect/*/hooks/lib-interspect.sh' -o -path '*/clavain/*/hooks/lib-interspect.sh' 2>/dev/null | head -1)
+fi
+if [[ -z "$INTERSPECT_LIB" || ! -f "$INTERSPECT_LIB" ]]; then
     echo "Error: Could not locate hooks/lib-interspect.sh" >&2
     exit 1
 fi
