@@ -2395,6 +2395,53 @@ _interspect_process_disagreement_event() {
     done <<< "$agent_entries"
 }
 
+# Process an execution_defect event from the kernel review_events table.
+# Creates evidence records for the target agent (the one whose code had the defect).
+# Args: $1=event_json (full ReviewEvent JSON with event_type=execution_defect)
+_interspect_process_execution_defect() {
+    local event_json="$1"
+
+    local finding_id resolution chosen_severity impact agents_json session_id event_id
+    finding_id=$(echo "$event_json" | jq -r '.finding_id // empty') || return 0
+    event_id=$(echo "$event_json" | jq -r '.id // empty') || event_id=""
+    resolution=$(echo "$event_json" | jq -r '.resolution // empty') || return 0
+    chosen_severity=$(echo "$event_json" | jq -r '.chosen_severity // empty') || return 0
+    impact=$(echo "$event_json" | jq -r '.impact // empty') || return 0
+    agents_json=$(echo "$event_json" | jq -r '.agents_json // "{}"') || return 0
+    session_id=$(echo "$event_json" | jq -r '.session_id // "unknown"') || return 0
+
+    [[ -z "$finding_id" || -z "$resolution" ]] && return 0
+
+    # Extract reporter and target from agents_json
+    # Format: {"reporter":"agent-a","target":"agent-b"} or {"agent-name":"role"}
+    local target_agent reporter_agent
+    target_agent=$(echo "$agents_json" | jq -r '.target // empty' 2>/dev/null) || target_agent=""
+    reporter_agent=$(echo "$agents_json" | jq -r '.reporter // empty' 2>/dev/null) || reporter_agent=""
+
+    # If structured reporter/target format isn't used, fall back to first key as target
+    if [[ -z "$target_agent" ]]; then
+        target_agent=$(echo "$agents_json" | jq -r 'keys[0] // empty' 2>/dev/null) || return 0
+    fi
+
+    [[ -z "$target_agent" ]] && return 0
+
+    local context
+    context=$(jq -n \
+        --arg finding_id "$finding_id" \
+        --arg reporter "$reporter_agent" \
+        --arg target "$target_agent" \
+        --arg severity "$chosen_severity" \
+        --arg resolution "$resolution" \
+        --arg impact "$impact" \
+        '{finding_id:$finding_id,reporter:$reporter,target:$target,severity:$severity,resolution:$resolution,impact:$impact}')
+
+    _interspect_insert_evidence \
+        "$session_id" "$target_agent" "execution_defect" \
+        "" "$context" "interspect-execution-defect" \
+        "$event_id" "review_events" "" \
+        2>/dev/null || true
+}
+
 # Consume review events from kernel and convert to interspect evidence.
 # Uses ic state for cursor persistence (separate from the event cursor system,
 # since review events are not in the UNION ALL stream).
@@ -2416,7 +2463,17 @@ _interspect_consume_review_events() {
     while IFS= read -r event_line; do
         [[ -z "$event_line" ]] && continue
 
-        _interspect_process_disagreement_event "$event_line" || true
+        # Dispatch by event_type
+        local evt_type
+        evt_type=$(echo "$event_line" | jq -r '.event_type // "disagreement_resolved"') || evt_type="disagreement_resolved"
+        case "$evt_type" in
+            execution_defect)
+                _interspect_process_execution_defect "$event_line" || true
+                ;;
+            *)
+                _interspect_process_disagreement_event "$event_line" || true
+                ;;
+        esac
 
         local event_id
         event_id=$(echo "$event_line" | jq -r '.id // 0') || continue
@@ -2554,7 +2611,7 @@ _interspect_sanitize() {
 _interspect_validate_hook_id() {
     local hook_id="$1"
     case "$hook_id" in
-        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-verdict|interspect-delegation)
+        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-execution-defect|interspect-verdict|interspect-delegation)
             return 0
             ;;
         *)
