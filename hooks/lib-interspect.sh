@@ -102,6 +102,13 @@ CREATE INDEX IF NOT EXISTS idx_canary_samples_canary ON canary_samples(canary_id
 MIGRATE
         # Add run_id column to sessions (E4.3: session-to-run correlation)
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE sessions ADD COLUMN run_id TEXT;" 2>/dev/null || true
+        # Add source column to sessions (calibration v2: source weighting)
+        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE sessions ADD COLUMN source TEXT DEFAULT 'normal';" 2>/dev/null || true
+        # Add lineage columns to evidence (iv-w3ee6)
+        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN source_event_id TEXT;" 2>/dev/null || true
+        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN source_table TEXT;" 2>/dev/null || true
+        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN raw_override_reason TEXT;" 2>/dev/null || true
+        sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_source_event_id ON evidence(source_event_id);" 2>/dev/null || true
         # Ensure overlays directory exists (Type 1 modifications)
         mkdir -p "$(dirname "$_INTERSPECT_DB")/overlays" 2>/dev/null || true
         # Ensure durable cursor for kernel event consumer (E4.2/E4.5)
@@ -148,7 +155,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     start_ts TEXT NOT NULL,
     end_ts TEXT,
     project TEXT,
-    run_id TEXT
+    run_id TEXT,
+    source TEXT DEFAULT 'normal'
 );
 
 CREATE TABLE IF NOT EXISTS canary (
@@ -2630,7 +2638,8 @@ _interspect_insert_evidence() {
     local source="$2"
     local event="$3"
     local override_reason="${4:-}"
-    local context_json="${5:-{}}"
+    local _default_ctx='{}'
+    local context_json="${5:-$_default_ctx}"
     local hook_id="${6:-}"
     local source_event_id="${7:-}"
     local source_table="${8:-}"
@@ -2678,6 +2687,55 @@ _interspect_insert_evidence() {
     sqlite3 "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''));"
 }
 
+# ─── Session Source Classification (Calibration v2) ──────────────────────────
+
+# Classify a session's source type for weighting in calibration.
+# Bootstrap sessions get 0.5x weight, self-building 0.7x, normal 1.0x.
+# Args: $1=bead_id (optional)
+# Output: "bootstrap" | "self-building" | "normal" on stdout
+_interspect_classify_session_source() {
+    local bead_id="${1:-}"
+
+    # Check for bootstrap marker (set by project-onboard or bootstrap scripts)
+    if [[ -f "/tmp/interstat-bootstrap" ]] || [[ "${CLAUDE_SESSION_SOURCE:-}" == "bootstrap" ]]; then
+        echo "bootstrap"
+        return 0
+    fi
+
+    # Check if working on interspect itself (via bead title)
+    if [[ -n "$bead_id" ]] && command -v bd &>/dev/null; then
+        local title
+        title=$(bd show "$bead_id" 2>/dev/null | head -1) || title=""
+        if [[ "$title" == *"[interspect]"* ]] || [[ "$title" == *"interspect"* ]] || [[ "$title" == *"Interspect"* ]]; then
+            echo "self-building"
+            return 0
+        fi
+    fi
+
+    # Check git diff for interspect file changes
+    local changed_files
+    changed_files=$(git diff --name-only HEAD 2>/dev/null) || changed_files=""
+    if echo "$changed_files" | grep -q 'interverse/interspect/' 2>/dev/null; then
+        echo "self-building"
+        return 0
+    fi
+
+    echo "normal"
+}
+
+# Update session source classification in the DB.
+# Args: $1=session_id, $2=source (bootstrap|self-building|normal)
+_interspect_update_session_source() {
+    local session_id="$1"
+    local source="$2"
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || return 0
+
+    local e_sid="${session_id//\'/\'\'}"
+    local e_source="${source//\'/\'\'}"
+    sqlite3 "$db" "UPDATE sessions SET source = '${e_source}' WHERE session_id = '${e_sid}';" 2>/dev/null || true
+}
+
 # Record a verdict outcome as evidence.
 # Called from quality-gates call site (not from lib-verdict.sh).
 # Args: $1=session_id $2=agent_name $3=status $4=findings_count $5=model_used
@@ -2711,50 +2769,126 @@ _interspect_record_verdict() {
         "interspect-verdict"
 }
 
+# Sweep unrecorded verdict files from quality-gates runs.
+# Called by SessionStart hook to catch verdicts the previous session didn't record.
+# Idempotent: tracks recorded verdicts via marker files in the verdicts directory.
+# Args: $1=verdicts_dir (default: .clavain/verdicts), $2=session_id
+_interspect_sweep_verdicts() {
+    local verdicts_dir="${1:-.clavain/verdicts}"
+    local session_id="${2:-$(cat /tmp/interstat-session-id 2>/dev/null || echo "sweep")}"
+
+    [[ -d "$verdicts_dir" ]] || return 0
+    _interspect_ensure_db || return 0
+
+    local recorded=0
+    local skipped=0
+
+    for verdict_file in "$verdicts_dir"/*.json; do
+        [[ -f "$verdict_file" ]] || continue
+        local basename
+        basename=$(basename "$verdict_file" .json)
+
+        # Skip non-verdict files (synthesis, etc.)
+        [[ "$basename" == "synthesis" ]] && continue
+
+        # Check marker file for idempotency
+        local marker="${verdicts_dir}/.recorded-${basename}"
+        if [[ -f "$marker" ]]; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        # Extract verdict data
+        local status findings model
+        status=$(jq -r '.status // "UNKNOWN"' "$verdict_file" 2>/dev/null) || continue
+        findings=$(jq -r '.findings_count // 0' "$verdict_file" 2>/dev/null) || findings=0
+        model=$(jq -r '.model // "unknown"' "$verdict_file" 2>/dev/null) || model="unknown"
+
+        # Record the verdict event
+        _interspect_record_verdict "$session_id" "$basename" "$status" "$findings" "$model"
+        local rc=$?
+
+        if [[ $rc -eq 0 ]]; then
+            # Write marker (content: timestamp + source for auditability)
+            printf 'recorded_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$marker"
+            recorded=$((recorded + 1))
+        fi
+    done
+
+    if [[ $recorded -gt 0 ]]; then
+        echo "interspect: swept $recorded verdict(s), $skipped already recorded" >&2
+    fi
+}
+
 # ─── Agent Scoring + Calibration ─────────────────────────────────────────────
 
 _INTERSPECT_CALIBRATION_MIN_SESSIONS=3
+_INTERSPECT_CALIBRATION_MIN_NON_BOOTSTRAP=20
 _INTERSPECT_CALIBRATION_HIT_THRESHOLD_HIGH=0.6
 _INTERSPECT_CALIBRATION_HIT_THRESHOLD_LOW=0.3
 _INTERSPECT_CALIBRATION_CONFIDENCE_THRESHOLD=0.7
+
+# Source weights for calibration v2 (bootstrap sessions are less reliable)
+_INTERSPECT_SOURCE_WEIGHT_BOOTSTRAP=0.5
+_INTERSPECT_SOURCE_WEIGHT_SELF_BUILDING=0.7
+_INTERSPECT_SOURCE_WEIGHT_NORMAL=1.0
 
 # Safety floor agents — never recommend below sonnet.
 # Must match agent-roles.yaml entries. Checked at calibration output time.
 _INTERSPECT_SAFETY_FLOOR_AGENTS="fd-architecture fd-correctness fd-safety fd-quality"
 
-# Compute agent scores from evidence. Read-only DB access.
-# Note: mutates global confidence cache via _interspect_load_confidence.
+# Compute agent scores from evidence with source weighting (v2).
+# Joins evidence with sessions table to get session source for weight multipliers.
 # Output: JSON array of scored agents on stdout.
 _interspect_compute_agent_scores() {
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || { echo "[]"; return 0; }
 
-    # Query: normalize agent names at query time (same CASE pattern as _interspect_get_classified_patterns)
+    # Query: normalize agent names, join sessions for source weighting
     local raw
     raw=$(sqlite3 -json "$db" "
         SELECT
             CASE
-                WHEN source LIKE 'interflux:review:%' THEN SUBSTR(source, INSTR(source, ':') + INSTR(SUBSTR(source, INSTR(source, ':') + 1), ':') + 1)
-                WHEN source LIKE 'interflux:%' THEN SUBSTR(source, 11)
-                ELSE source
+                WHEN e.source LIKE 'interflux:review:%' THEN SUBSTR(e.source, INSTR(e.source, ':') + INSTR(SUBSTR(e.source, INSTR(e.source, ':') + 1), ':') + 1)
+                WHEN e.source LIKE 'interflux:%' THEN SUBSTR(e.source, 11)
+                ELSE e.source
             END as agent,
-            event,
-            json_extract(context, '$.status') as verdict_status,
-            json_extract(context, '$.findings_count') as findings_count,
-            json_extract(context, '$.model_used') as model_used,
-            session_id
-        FROM evidence
-        WHERE event IN ('agent_dispatch', 'verdict_outcome', 'override', 'disagreement_override')
-        ORDER BY agent, ts
+            e.event,
+            json_extract(e.context, '$.status') as verdict_status,
+            json_extract(e.context, '$.findings_count') as findings_count,
+            json_extract(e.context, '$.model_used') as model_used,
+            e.session_id,
+            COALESCE(s.source, 'normal') as session_source
+        FROM evidence e
+        LEFT JOIN sessions s ON e.session_id = s.session_id
+        WHERE e.event IN ('agent_dispatch', 'verdict_outcome', 'override', 'disagreement_override')
+        ORDER BY agent, e.ts
     " 2>/dev/null) || raw="[]"
 
     [[ "$raw" == "[]" || -z "$raw" ]] && { echo "[]"; return 0; }
 
-    # Process with jq: group by agent, compute scores
+    # Count non-bootstrap sessions for threshold check
+    local non_bootstrap_count
+    non_bootstrap_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM sessions WHERE COALESCE(source, 'normal') != 'bootstrap';" 2>/dev/null) || non_bootstrap_count=0
+
+    # Process with jq: group by agent, compute weighted scores
     echo "$raw" | jq -c --argjson min_sessions "$_INTERSPECT_CALIBRATION_MIN_SESSIONS" \
+        --argjson min_non_bootstrap "$_INTERSPECT_CALIBRATION_MIN_NON_BOOTSTRAP" \
+        --argjson non_bootstrap_count "$non_bootstrap_count" \
         --argjson hit_high "$_INTERSPECT_CALIBRATION_HIT_THRESHOLD_HIGH" \
         --argjson hit_low "$_INTERSPECT_CALIBRATION_HIT_THRESHOLD_LOW" \
+        --argjson w_bootstrap "$_INTERSPECT_SOURCE_WEIGHT_BOOTSTRAP" \
+        --argjson w_self_building "$_INTERSPECT_SOURCE_WEIGHT_SELF_BUILDING" \
+        --argjson w_normal "$_INTERSPECT_SOURCE_WEIGHT_NORMAL" \
         --arg safety_agents "$_INTERSPECT_SAFETY_FLOOR_AGENTS" '
+
+        # Source weight lookup
+        def source_weight:
+            if . == "bootstrap" then $w_bootstrap
+            elif . == "self-building" then $w_self_building
+            else $w_normal
+            end;
+
         group_by(.agent) | map(
             .[0].agent as $agent |
             [.[] | select(.event == "verdict_outcome")] as $verdicts |
@@ -2763,6 +2897,14 @@ _interspect_compute_agent_scores() {
             ($verdicts | length) as $verdict_count |
             ($verdicts | map(.findings_count // 0 | tonumber) | add // 0) as $total_findings |
             ($verdicts | map(select(.verdict_status == "NEEDS_ATTENTION")) | length) as $attention_count |
+
+            # Weighted hit rate: sum(weight * attention) / sum(weight * total)
+            ($verdicts | map(
+                (.session_source // "normal" | source_weight) as $w |
+                {w: $w, attention: (if .verdict_status == "NEEDS_ATTENTION" then 1 else 0 end)}
+            )) as $weighted |
+            ($weighted | map(.w) | add // 0) as $total_weight |
+            ($weighted | map(.w * .attention) | add // 0) as $weighted_attention |
 
             # Skip agents with insufficient evidence
             if $sessions < $min_sessions then
@@ -2773,33 +2915,40 @@ _interspect_compute_agent_scores() {
                 {agent: $agent, evidence_sessions: $sessions, hit_rate: null, skip: true, reason: "insufficient_findings"}
             else
                 ($attention_count / $verdict_count) as $hit_rate |
+                (if $total_weight > 0 then $weighted_attention / $total_weight else $hit_rate end) as $weighted_hit_rate |
                 (if $sessions >= 5 then 0.85
                  elif $sessions >= 3 then 0.7
                  else 0.5 end) as $confidence |
 
-                # Determine recommendation
+                # Use weighted hit rate for recommendations
                 ($safety_agents | split(" ") | any(. == $agent)) as $is_safety |
-                (if $hit_rate >= $hit_high then "sonnet"
-                 elif $hit_rate < $hit_low then
+                (if $weighted_hit_rate >= $hit_high then "sonnet"
+                 elif $weighted_hit_rate < $hit_low then
                     if $is_safety then "sonnet"
                     else "haiku"
                     end
                  else null  # no change — insufficient signal
                  end) as $recommended |
 
+                # Check non-bootstrap threshold for propagation eligibility
+                ($non_bootstrap_count >= $min_non_bootstrap) as $propagation_eligible |
+
                 {
                     agent: $agent,
                     evidence_sessions: $sessions,
                     hit_rate: ($hit_rate * 100 | round / 100),
+                    weighted_hit_rate: ($weighted_hit_rate * 100 | round / 100),
                     confidence: $confidence,
                     recommended_model: ($recommended // "sonnet"),
                     current_model: "sonnet",
+                    propagation_eligible: $propagation_eligible,
                     reason: (
-                        if $recommended == null then "hit_rate in dead zone (0.3-0.6), no change"
-                        elif $is_safety and $hit_rate < $hit_low then "low hit rate but safety floor prevents demotion"
-                        elif $hit_rate >= $hit_high then "high hit rate, appropriate tier"
-                        elif $hit_rate < $hit_low then "low hit rate, recommend demotion"
-                        else "moderate hit rate"
+                        if $recommended == null then "weighted_hit_rate in dead zone (0.3-0.6), no change"
+                        elif ($propagation_eligible | not) then "insufficient non-bootstrap sessions (\($non_bootstrap_count)/\($min_non_bootstrap))"
+                        elif $is_safety and $weighted_hit_rate < $hit_low then "low hit rate but safety floor prevents demotion"
+                        elif $weighted_hit_rate >= $hit_high then "high weighted hit rate, appropriate tier"
+                        elif $weighted_hit_rate < $hit_low then "low weighted hit rate, recommend demotion"
+                        else "moderate weighted hit rate"
                         end
                     ),
                     skip: false
@@ -2823,20 +2972,32 @@ _interspect_write_routing_calibration() {
     calibration_dir="$(dirname "$db")"
     local calibration_path="${calibration_dir}/routing-calibration.json"
 
-    # Build calibration JSON
+    # Build calibration JSON (v2 with source weighting)
     local calibration_json
     calibration_json=$(echo "$scores" | jq -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        --argjson min "$_INTERSPECT_CALIBRATION_MIN_SESSIONS" '
+        --argjson min "$_INTERSPECT_CALIBRATION_MIN_SESSIONS" \
+        --argjson min_non_bootstrap "$_INTERSPECT_CALIBRATION_MIN_NON_BOOTSTRAP" \
+        --argjson w_bootstrap "$_INTERSPECT_SOURCE_WEIGHT_BOOTSTRAP" \
+        --argjson w_self_building "$_INTERSPECT_SOURCE_WEIGHT_SELF_BUILDING" \
+        --argjson w_normal "$_INTERSPECT_SOURCE_WEIGHT_NORMAL" '
         {
             calibrated_at: $ts,
-            schema_version: 1,
+            schema_version: 2,
             min_sessions: $min,
+            min_non_bootstrap_sessions: $min_non_bootstrap,
+            source_weights: {
+                bootstrap: $w_bootstrap,
+                "self-building": $w_self_building,
+                normal: $w_normal
+            },
             agents: (reduce .[] as $a ({}; . + {($a.agent): {
                 recommended_model: $a.recommended_model,
                 current_model: $a.current_model,
                 hit_rate: $a.hit_rate,
+                weighted_hit_rate: $a.weighted_hit_rate,
                 evidence_sessions: $a.evidence_sessions,
                 confidence: $a.confidence,
+                propagation_eligible: $a.propagation_eligible,
                 reason: $a.reason
             }}))
         }

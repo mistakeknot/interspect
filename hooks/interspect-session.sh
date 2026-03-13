@@ -58,6 +58,14 @@ fi
 # Consume kernel events (catch up since last session)
 _interspect_consume_kernel_events "$SESSION_ID" 2>/dev/null || true
 
+# Classify session source for calibration weighting
+BEAD_ID=$(cat /tmp/interstat-bead-"${SESSION_ID}" 2>/dev/null || echo "")
+SESSION_SOURCE=$(_interspect_classify_session_source "$BEAD_ID" 2>/dev/null) || SESSION_SOURCE="normal"
+_interspect_update_session_source "$SESSION_ID" "$SESSION_SOURCE" 2>/dev/null || true
+
+# Sweep unrecorded verdicts from previous quality-gates runs
+_interspect_sweep_verdicts ".clavain/verdicts" "$SESSION_ID" 2>/dev/null || true
+
 # Check for canary alerts — evaluate completed canaries first
 _interspect_check_canaries >/dev/null 2>&1 || true
 
