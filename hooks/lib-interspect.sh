@@ -2706,15 +2706,15 @@ _interspect_classify_session_source() {
     if [[ -n "$bead_id" ]] && command -v bd &>/dev/null; then
         local title
         title=$(bd show "$bead_id" 2>/dev/null | head -1) || title=""
-        if [[ "$title" == *"[interspect]"* ]] || [[ "$title" == *"interspect"* ]] || [[ "$title" == *"Interspect"* ]]; then
+        if [[ "$title" == *"[interspect]"* ]] || [[ "$title" == *"[Interspect]"* ]]; then
             echo "self-building"
             return 0
         fi
     fi
 
-    # Check git diff for interspect file changes
+    # Check git diff for interspect file changes (unstaged + staged + last commit)
     local changed_files
-    changed_files=$(git diff --name-only HEAD 2>/dev/null) || changed_files=""
+    changed_files=$({ git diff --name-only HEAD 2>/dev/null; git diff --cached --name-only 2>/dev/null; git diff --name-only HEAD~1 HEAD 2>/dev/null; } | sort -u) || changed_files=""
     if echo "$changed_files" | grep -q 'interverse/interspect/' 2>/dev/null; then
         echo "self-building"
         return 0
@@ -2727,12 +2727,12 @@ _interspect_classify_session_source() {
 # Args: $1=session_id, $2=source (bootstrap|self-building|normal)
 _interspect_update_session_source() {
     local session_id="$1"
-    local source="$2"
+    local session_source="$2"
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || return 0
 
     local e_sid="${session_id//\'/\'\'}"
-    local e_source="${source//\'/\'\'}"
+    local e_source="${session_source//\'/\'\'}"
     sqlite3 "$db" "UPDATE sessions SET source = '${e_source}' WHERE session_id = '${e_sid}';" 2>/dev/null || true
 }
 
@@ -2785,14 +2785,14 @@ _interspect_sweep_verdicts() {
 
     for verdict_file in "$verdicts_dir"/*.json; do
         [[ -f "$verdict_file" ]] || continue
-        local basename
-        basename=$(basename "$verdict_file" .json)
+        local verdict_name
+        verdict_name=$(basename "$verdict_file" .json)
 
         # Skip non-verdict files (synthesis, etc.)
-        [[ "$basename" == "synthesis" ]] && continue
+        [[ "$verdict_name" == "synthesis" ]] && continue
 
         # Check marker file for idempotency
-        local marker="${verdicts_dir}/.recorded-${basename}"
+        local marker="${verdicts_dir}/.recorded-${verdict_name}"
         if [[ -f "$marker" ]]; then
             skipped=$((skipped + 1))
             continue
@@ -2804,13 +2804,15 @@ _interspect_sweep_verdicts() {
         findings=$(jq -r '.findings_count // 0' "$verdict_file" 2>/dev/null) || findings=0
         model=$(jq -r '.model // "unknown"' "$verdict_file" 2>/dev/null) || model="unknown"
 
-        # Record the verdict event
-        _interspect_record_verdict "$session_id" "$basename" "$status" "$findings" "$model"
-        local rc=$?
+        # Record the verdict event (capture exit code before local)
+        local rc
+        _interspect_record_verdict "$session_id" "$verdict_name" "$status" "$findings" "$model"
+        rc=$?
 
         if [[ $rc -eq 0 ]]; then
-            # Write marker (content: timestamp + source for auditability)
-            printf 'recorded_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$marker"
+            # Write marker atomically (tmp+mv prevents partial marker on crash)
+            printf 'recorded_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${marker}.tmp" \
+                && mv "${marker}.tmp" "$marker"
             recorded=$((recorded + 1))
         fi
     done
@@ -2858,7 +2860,7 @@ _interspect_compute_agent_scores() {
             json_extract(e.context, '$.findings_count') as findings_count,
             json_extract(e.context, '$.model_used') as model_used,
             e.session_id,
-            COALESCE(s.source, 'normal') as session_source
+            COALESCE(s.source, 'bootstrap') as session_source
         FROM evidence e
         LEFT JOIN sessions s ON e.session_id = s.session_id
         WHERE e.event IN ('agent_dispatch', 'verdict_outcome', 'override', 'disagreement_override')
