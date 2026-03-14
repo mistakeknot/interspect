@@ -2619,7 +2619,7 @@ _interspect_sanitize() {
 _interspect_validate_hook_id() {
     local hook_id="$1"
     case "$hook_id" in
-        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-execution-defect|interspect-verdict|interspect-delegation|interspect-routing)
+        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-execution-defect|interspect-verdict|interspect-delegation)
             return 0
             ;;
         *)
@@ -2769,63 +2769,6 @@ _interspect_record_verdict() {
         "interspect-verdict"
 }
 
-# Consume routing decisions from .clavain/routing-decisions.jsonl.
-# Written by lib-routing.sh routing_resolve_agents() when complexity mode is active.
-# Each line is a JSON object: {ts, session_id, agent, model, phase, complexity, decision_source}
-# Called by session-end hook. Truncates the file after consumption.
-# Args: $1=session_id
-_interspect_consume_routing_decisions() {
-    local session_id="${1:-$(cat /tmp/interstat-session-id 2>/dev/null || echo "unknown")}"
-    local root
-    root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
-    local decisions_file="${root}/.clavain/routing-decisions.jsonl"
-    [[ -f "$decisions_file" ]] || return 0
-
-    _interspect_ensure_db || return 0
-
-    local consumed=0
-    local line
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        local agent model phase cx_tier source
-        agent=$(printf '%s' "$line" | jq -r '.agent // ""' 2>/dev/null) || continue
-        model=$(printf '%s' "$line" | jq -r '.model // ""' 2>/dev/null) || continue
-        phase=$(printf '%s' "$line" | jq -r '.phase // ""' 2>/dev/null) || phase=""
-        cx_tier=$(printf '%s' "$line" | jq -r '.complexity // ""' 2>/dev/null) || cx_tier=""
-        source=$(printf '%s' "$line" | jq -r '.decision_source // "B1"' 2>/dev/null) || source="B1"
-
-        [[ -z "$agent" || -z "$model" ]] && continue
-
-        # Normalize agent name
-        agent=$(_interspect_normalize_agent_name "$agent")
-
-        # Build context
-        local context
-        context=$(jq -n \
-            --arg model "$model" \
-            --arg phase "$phase" \
-            --arg complexity "$cx_tier" \
-            --arg source "$source" \
-            '{model_chosen: $model, phase: $phase, complexity_tier: $complexity, decision_source: $source}') || context="{}"
-
-        _interspect_insert_evidence \
-            "$session_id" \
-            "$agent" \
-            "routing_decision" \
-            "" \
-            "$context" \
-            "interspect-routing"
-
-        consumed=$((consumed + 1))
-    done < "$decisions_file"
-
-    # Truncate after consumption (atomic: write empty then mv)
-    if [[ $consumed -gt 0 ]]; then
-        : > "${decisions_file}.tmp" && mv "${decisions_file}.tmp" "$decisions_file" 2>/dev/null
-    fi
-
-    return 0
-}
 
 # Sweep unrecorded verdict files from quality-gates runs.
 # Called by SessionStart hook to catch verdicts the previous session didn't record.
