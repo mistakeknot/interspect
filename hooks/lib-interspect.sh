@@ -2799,14 +2799,19 @@ _interspect_sweep_verdicts() {
         fi
 
         # Extract verdict data
-        local status findings model
+        local status findings model origin_sid
         status=$(jq -r '.status // "UNKNOWN"' "$verdict_file" 2>/dev/null) || continue
         findings=$(jq -r '.findings_count // 0' "$verdict_file" 2>/dev/null) || findings=0
         model=$(jq -r '.model // "unknown"' "$verdict_file" 2>/dev/null) || model="unknown"
 
+        # Use originating session_id from verdict JSON if available (Demarch-k1b fix).
+        # Falls back to sweep session_id for legacy verdicts without the field.
+        origin_sid=$(jq -r '.session_id // ""' "$verdict_file" 2>/dev/null) || origin_sid=""
+        [[ -z "$origin_sid" ]] && origin_sid="$session_id"
+
         # Record the verdict event (capture exit code before local)
         local rc
-        _interspect_record_verdict "$session_id" "$verdict_name" "$status" "$findings" "$model"
+        _interspect_record_verdict "$origin_sid" "$verdict_name" "$status" "$findings" "$model"
         rc=$?
 
         if [[ $rc -eq 0 ]]; then
