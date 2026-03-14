@@ -36,6 +36,9 @@ sqlite3 "$_INTERSPECT_DB" \
     "UPDATE sessions SET end_ts = '${TS}' WHERE session_id = '${E_SID}' AND end_ts IS NULL;" \
     2>/dev/null || true
 
+# Consume routing decisions emitted by lib-routing.sh during this session
+_interspect_consume_routing_decisions "$SESSION_ID" 2>/dev/null || true
+
 # Record canary samples (if any active canaries exist)
 # Fail-open: errors here must not block session teardown
 _interspect_record_canary_sample "$SESSION_ID" 2>/dev/null || true
