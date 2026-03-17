@@ -3532,3 +3532,148 @@ _interspect_disable_overlay_locked() {
     sqlite3 "$db" "UPDATE modifications SET status = 'reverted' WHERE group_id = '${group_id}' AND status = 'applied';" 2>/dev/null || true
     sqlite3 "$db" "UPDATE canary SET status = 'reverted' WHERE group_id = '${group_id}' AND status = 'active';" 2>/dev/null || true
 }
+
+# ─── Effectiveness metrics ──────────────────────────────────────────────────
+
+# _interspect_effectiveness_report <window_days>
+# Returns JSON with aggregate routing effectiveness metrics.
+# Compares current window to prior window of same length.
+_interspect_effectiveness_report() {
+    local window_days="${1:-30}"
+    local db
+    db=$(_interspect_db_path) || { echo '{"error":"no_db","agents":[],"prior":[]}'; return 0; }
+
+    # Per-agent stats for current window
+    local agents_json
+    agents_json=$(sqlite3 "$db" "
+        SELECT json_group_array(json_object(
+            'agent', source,
+            'dispatches', dispatches,
+            'corrections', corrections,
+            'override_rate', ROUND(CAST(corrections AS REAL) / MAX(dispatches, 1) * 100, 1),
+            'sessions', sessions
+        ))
+        FROM (
+            SELECT
+                source,
+                SUM(CASE WHEN event = 'agent_dispatch' THEN 1 ELSE 0 END) AS dispatches,
+                SUM(CASE WHEN event = 'override' THEN 1 ELSE 0 END) AS corrections,
+                COUNT(DISTINCT session_id) AS sessions
+            FROM evidence
+            WHERE ts > datetime('now', '-${window_days} days')
+              AND source LIKE 'fd-%'
+            GROUP BY source
+            HAVING dispatches > 0
+            ORDER BY corrections DESC
+        );
+    " 2>/dev/null) || agents_json="[]"
+    [[ -z "$agents_json" || "$agents_json" == "null" ]] && agents_json="[]"
+
+    # Prior window for trend comparison
+    local prior_json
+    prior_json=$(sqlite3 "$db" "
+        SELECT json_group_array(json_object(
+            'agent', source,
+            'override_rate', ROUND(CAST(SUM(CASE WHEN event = 'override' THEN 1 ELSE 0 END) AS REAL) /
+                MAX(SUM(CASE WHEN event = 'agent_dispatch' THEN 1 ELSE 0 END), 1) * 100, 1)
+        ))
+        FROM (
+            SELECT source, event
+            FROM evidence
+            WHERE ts > datetime('now', '-$((window_days * 2)) days')
+              AND ts <= datetime('now', '-${window_days} days')
+              AND source LIKE 'fd-%'
+        )
+        GROUP BY source
+        HAVING SUM(CASE WHEN event = 'agent_dispatch' THEN 1 ELSE 0 END) > 0;
+    " 2>/dev/null) || prior_json="[]"
+    [[ -z "$prior_json" || "$prior_json" == "null" ]] && prior_json="[]"
+
+    # Aggregate totals
+    local agg
+    agg=$(sqlite3 -separator '|' "$db" "
+        SELECT
+            COALESCE(SUM(CASE WHEN event = 'agent_dispatch' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN event = 'override' THEN 1 ELSE 0 END), 0),
+            COUNT(DISTINCT session_id)
+        FROM evidence
+        WHERE ts > datetime('now', '-${window_days} days')
+          AND source LIKE 'fd-%';
+    " 2>/dev/null) || agg="0|0|0"
+
+    local total_dispatches total_corrections total_sessions
+    total_dispatches=$(echo "$agg" | cut -d'|' -f1)
+    total_corrections=$(echo "$agg" | cut -d'|' -f2)
+    total_sessions=$(echo "$agg" | cut -d'|' -f3)
+    : "${total_dispatches:=0}" "${total_corrections:=0}" "${total_sessions:=0}"
+
+    local override_rate=0
+    if [[ "$total_dispatches" -gt 0 ]]; then
+        override_rate=$(echo "scale=1; $total_corrections * 100 / $total_dispatches" | bc 2>/dev/null || echo "0")
+    fi
+
+    # Active overrides count
+    local overrides_json active_overrides
+    overrides_json=$(_interspect_read_routing_overrides 2>/dev/null || echo '{"overrides":[]}')
+    active_overrides=$(echo "$overrides_json" | jq '[.overrides[] | select(.action == "exclude")] | length' 2>/dev/null || echo "0")
+
+    # Output structured JSON
+    jq -n \
+        --argjson agents "$agents_json" \
+        --argjson prior "$prior_json" \
+        --arg window "$window_days" \
+        --arg override_rate "$override_rate" \
+        --arg total_dispatches "$total_dispatches" \
+        --arg total_corrections "$total_corrections" \
+        --arg total_sessions "$total_sessions" \
+        --arg active_overrides "$active_overrides" \
+        '{
+            window_days: ($window | tonumber),
+            override_rate: ($override_rate | tonumber),
+            total_dispatches: ($total_dispatches | tonumber),
+            total_corrections: ($total_corrections | tonumber),
+            total_sessions: ($total_sessions | tonumber),
+            active_overrides: ($active_overrides | tonumber),
+            agents: $agents,
+            prior: $prior
+        }'
+}
+
+# _interspect_effectiveness_summary
+# Returns a one-line effectiveness summary for /interspect:status.
+_interspect_effectiveness_summary() {
+    local db
+    db=$(_interspect_db_path) || { echo "Effectiveness: insufficient data"; return 0; }
+
+    local current prior
+    current=$(sqlite3 "$db" "
+        SELECT ROUND(CAST(COALESCE(SUM(CASE WHEN event='override' THEN 1 ELSE 0 END), 0) AS REAL) /
+            MAX(COALESCE(SUM(CASE WHEN event='agent_dispatch' THEN 1 ELSE 0 END), 0), 1) * 100, 1)
+        FROM evidence WHERE ts > datetime('now','-30 days') AND source LIKE 'fd-%';
+    " 2>/dev/null) || current=""
+    prior=$(sqlite3 "$db" "
+        SELECT ROUND(CAST(COALESCE(SUM(CASE WHEN event='override' THEN 1 ELSE 0 END), 0) AS REAL) /
+            MAX(COALESCE(SUM(CASE WHEN event='agent_dispatch' THEN 1 ELSE 0 END), 0), 1) * 100, 1)
+        FROM evidence WHERE ts > datetime('now','-60 days') AND ts <= datetime('now','-30 days') AND source LIKE 'fd-%';
+    " 2>/dev/null) || prior=""
+
+    if [[ -z "$current" || "$current" == "" ]]; then
+        echo "Effectiveness: insufficient data"
+        return 0
+    fi
+
+    if [[ -z "$prior" || "$prior" == "" || "$prior" == "0" || "$prior" == "0.0" ]]; then
+        echo "Effectiveness: override rate ${current}%"
+        return 0
+    fi
+
+    local change
+    change=$(echo "scale=0; ($current - $prior) * 100 / $prior" | bc 2>/dev/null || echo "0")
+    if [[ "$change" -lt 0 ]]; then
+        echo "Effectiveness: override rate ${prior}% → ${current}% (${change}% — improving)"
+    elif [[ "$change" -gt 5 ]]; then
+        echo "Effectiveness: override rate ${prior}% → ${current}% (+${change}% — declining)"
+    else
+        echo "Effectiveness: override rate ${current}% (stable)"
+    fi
+}

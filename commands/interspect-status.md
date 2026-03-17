@@ -115,6 +115,19 @@ Present as:
 ### Modifications: {active_mods} applied
 ```
 
+## Effectiveness
+
+```bash
+EFFECTIVENESS=$(_interspect_effectiveness_summary 2>/dev/null || echo "")
+```
+
+Present if non-empty and not "insufficient data":
+```
+### {EFFECTIVENESS}
+```
+
+If it contains "insufficient data", show dimmed: `(Effectiveness: collecting data — need 60+ days of evidence)`
+
 ## Routing Overrides
 
 Read routing overrides using the shared-lock reader (prevents torn reads during concurrent apply):
