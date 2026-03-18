@@ -3677,3 +3677,184 @@ _interspect_effectiveness_summary() {
         echo "Effectiveness: override rate ${current}% (stable)"
     fi
 }
+
+# ─── Cross-project aggregation ──────────────────────────────────────────────
+
+# _interspect_discover_project_dbs
+# Finds all .clavain/interspect/interspect.db files under ~/projects/.
+# Returns one path per line. Excludes current project to avoid double-counting.
+_interspect_discover_project_dbs() {
+    local home_projects="${HOME}/projects"
+    [[ -d "$home_projects" ]] || return 0
+    local current_db
+    current_db=$(_interspect_db_path 2>/dev/null) || current_db=""
+
+    find "$home_projects" -maxdepth 5 -path '*/.clavain/interspect/interspect.db' -type f 2>/dev/null | while read -r db_path; do
+        [[ "$db_path" == "$current_db" ]] && continue
+        echo "$db_path"
+    done
+}
+
+# _interspect_cross_project_report <window_days>
+# Aggregates effectiveness data across all project interspect DBs.
+# Returns JSON with per-agent stats including project_count.
+_interspect_cross_project_report() {
+    local window_days="${1:-30}"
+    local all_agents=()
+
+    # Collect from all other project DBs
+    while IFS= read -r db_path; do
+        [[ -f "$db_path" ]] || continue
+        local project_name
+        # DB path is <root>/.clavain/interspect/interspect.db — project root is 3 dirs up
+        project_name=$(basename "$(dirname "$(dirname "$(dirname "$db_path")")")")
+
+        local agents
+        agents=$(sqlite3 "$db_path" "
+            SELECT json_group_array(json_object(
+                'agent', source,
+                'project', '${project_name//\'/\'\'}',
+                'dispatches', dispatches,
+                'corrections', corrections
+            ))
+            FROM (
+                SELECT
+                    source,
+                    SUM(CASE WHEN event='agent_dispatch' THEN 1 ELSE 0 END) AS dispatches,
+                    SUM(CASE WHEN event='override' THEN 1 ELSE 0 END) AS corrections
+                FROM evidence
+                WHERE ts > datetime('now', '-${window_days} days') AND source LIKE 'fd-%'
+                GROUP BY source
+                HAVING dispatches > 0
+            );
+        " 2>/dev/null) || continue
+        [[ -z "$agents" || "$agents" == "null" ]] && continue
+        all_agents+=("$agents")
+    done < <(_interspect_discover_project_dbs)
+
+    # Also include current project
+    local current_db
+    current_db=$(_interspect_db_path 2>/dev/null) || current_db=""
+    if [[ -n "$current_db" && -f "$current_db" ]]; then
+        local current_project
+        current_project=$(_interspect_project_name)
+        local current_agents
+        current_agents=$(sqlite3 "$current_db" "
+            SELECT json_group_array(json_object(
+                'agent', source,
+                'project', '${current_project//\'/\'\'}',
+                'dispatches', dispatches,
+                'corrections', corrections
+            ))
+            FROM (
+                SELECT
+                    source,
+                    SUM(CASE WHEN event='agent_dispatch' THEN 1 ELSE 0 END) AS dispatches,
+                    SUM(CASE WHEN event='override' THEN 1 ELSE 0 END) AS corrections
+                FROM evidence
+                WHERE ts > datetime('now', '-${window_days} days') AND source LIKE 'fd-%'
+                GROUP BY source
+                HAVING dispatches > 0
+            );
+        " 2>/dev/null) || true
+        [[ -n "$current_agents" && "$current_agents" != "null" ]] && all_agents+=("$current_agents")
+    fi
+
+    # Merge: aggregate by agent across all projects
+    if [[ ${#all_agents[@]} -eq 0 ]]; then
+        echo '{"agents":[],"project_count":0}'
+        return 0
+    fi
+
+    printf '%s\n' "${all_agents[@]}" | jq -s '
+        [. | flatten | group_by(.agent) | .[] | {
+            agent: .[0].agent,
+            projects: ([.[].project] | unique),
+            project_count: ([.[].project] | unique | length),
+            total_dispatches: ([.[].dispatches] | add),
+            total_corrections: ([.[].corrections] | add),
+            override_rate: (([.[].corrections] | add) / (([.[].dispatches] | add) | if . == 0 then 1 else . end) * 100 | . * 10 | floor / 10)
+        }] | sort_by(-.total_corrections) | {
+            agents: .,
+            project_count: ([.[] | .projects[]] | unique | length)
+        }
+    '
+}
+
+# ─── Overlay generation ─────────────────────────────────────────────────────
+
+# _interspect_generate_overlay <agent>
+# Generates overlay content from the agent's correction evidence.
+# Returns the overlay markdown body (without frontmatter) on stdout.
+_interspect_generate_overlay() {
+    local agent="$1"
+    local db
+    db=$(_interspect_db_path) || return 1
+
+    local escaped_agent
+    escaped_agent=$(_interspect_sql_escape "$agent")
+
+    # Get top correction reasons
+    local reasons
+    reasons=$(sqlite3 -separator '|' "$db" "
+        SELECT override_reason, COUNT(*) as cnt
+        FROM evidence
+        WHERE (source = '${escaped_agent}' OR source LIKE '%${escaped_agent}')
+          AND event = 'override'
+        GROUP BY override_reason
+        ORDER BY cnt DESC
+        LIMIT 5;
+    " 2>/dev/null) || reasons=""
+
+    if [[ -z "$reasons" ]]; then
+        echo "No correction evidence found for ${agent}."
+        return 1
+    fi
+
+    # Get total correction count
+    local total_corrections
+    total_corrections=$(sqlite3 "$db" "
+        SELECT COUNT(*)
+        FROM evidence
+        WHERE (source = '${escaped_agent}' OR source LIKE '%${escaped_agent}')
+          AND event = 'override';
+    " 2>/dev/null) || total_corrections="0"
+
+    # Detect project type
+    local project_type=""
+    local root
+    root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    if [[ -f "${root}/go.mod" ]]; then project_type="Go"
+    elif [[ -f "${root}/package.json" ]]; then project_type="TypeScript/JavaScript"
+    elif [[ -f "${root}/pyproject.toml" || -f "${root}/setup.py" ]]; then project_type="Python"
+    elif [[ -f "${root}/Cargo.toml" ]]; then project_type="Rust"
+    fi
+
+    local project
+    project=$(_interspect_project_name)
+
+    # Generate overlay content
+    local content=""
+    content+="## ${agent} — Project-Specific Tuning"$'\n'
+    content+=""$'\n'
+    content+="Project: ${project}${project_type:+ (${project_type})}"$'\n'
+    content+="Based on ${total_corrections} corrections."$'\n'
+    content+=""$'\n'
+    content+="### Correction Patterns"$'\n'
+    content+=""$'\n'
+
+    while IFS='|' read -r reason count; do
+        [[ -z "$reason" ]] && continue
+        content+="- **${reason}**: ${count} corrections"$'\n'
+    done <<< "$reasons"
+
+    content+=""$'\n'
+    content+="### Guidance"$'\n'
+    content+=""$'\n'
+    content+="When reviewing code in this project:"$'\n'
+    content+="- Focus on patterns relevant to ${project_type:-this project} ecosystem"$'\n'
+    content+="- Avoid generic recommendations that don't apply to this codebase"$'\n'
+    content+="- Prioritize findings that are actionable within the project's architecture"$'\n'
+
+    printf '%s' "$content"
+}

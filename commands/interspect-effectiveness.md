@@ -28,12 +28,17 @@ _interspect_ensure_db
 ## Parse Arguments
 
 Extract `--window=N` from `<effectiveness_args>` (default 30). Accept bare number too.
+Extract `--global` flag if present.
 
 ## Generate Report
 
 ```bash
 WINDOW=${window:-30}
-REPORT=$(_interspect_effectiveness_report "$WINDOW")
+if [[ "$GLOBAL" == "true" ]]; then
+    REPORT=$(_interspect_cross_project_report "$WINDOW")
+else
+    REPORT=$(_interspect_effectiveness_report "$WINDOW")
+fi
 ```
 
 ## Display
@@ -70,3 +75,13 @@ Compute trend by comparing current override_rate with prior:
 - Agent with override_rate > 50%: suggest `/interspect:propose`
 - Agent with declining trend (rate up >10%): warn and suggest `/interspect:evidence <agent>`
 - All stable/improving: "Routing is healthy"
+
+### 6. Global Mode (--global)
+
+When `--global` is set, the report uses `_interspect_cross_project_report` which aggregates across all project interspect databases found under `~/projects/`.
+
+Additional display for global mode:
+- Header: `Cross-Project Routing Effectiveness — Last ${WINDOW} days (${project_count} projects)`
+- Add "Projects" column to per-agent table showing project count and list
+- Highlight agents appearing in >50% of projects with high override rates: "Consider global exclusion"
+- Show which projects each problematic agent appears in

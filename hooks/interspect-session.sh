@@ -105,6 +105,27 @@ if (( ALERT_COUNT > 0 )); then
     SUMMARY_PARTS+=("WARNING: Canary alert for ${ALERT_AGENTS} — review quality may have degraded. Run /interspect:status or /interspect:revert <agent>.")
 fi
 
+# Inject active overlays into session context (fail-open)
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+OVERLAY_DIR="${ROOT}/.clavain/interspect/overlays"
+if [[ -d "$OVERLAY_DIR" ]]; then
+    OVERLAY_TOKENS=0
+    MAX_OVERLAY_TOKENS=2000
+    for agent_dir in "$OVERLAY_DIR"/*/; do
+        [[ -d "$agent_dir" ]] || continue
+        agent=$(basename "$agent_dir")
+        agent_content=$(_interspect_read_overlays "$agent" 2>/dev/null) || continue
+        [[ -z "$agent_content" ]] && continue
+        tokens=$(_interspect_count_overlay_tokens "$agent_content")
+        new_total=$((OVERLAY_TOKENS + tokens))
+        if (( new_total > MAX_OVERLAY_TOKENS )); then
+            break
+        fi
+        OVERLAY_TOKENS=$new_total
+        SUMMARY_PARTS+=("[Interspect tuning for ${agent}]"$'\n'"${agent_content}")
+    done
+fi
+
 # Emit summary as additionalContext if there's anything to report
 if (( ${#SUMMARY_PARTS[@]} > 0 )); then
     # Join parts with newlines (safe via jq)
