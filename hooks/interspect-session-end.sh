@@ -43,4 +43,7 @@ _interspect_record_canary_sample "$SESSION_ID" 2>/dev/null || true
 # Evaluate any canaries whose window has completed
 _interspect_check_canaries >/dev/null 2>&1 || true
 
+# Auto-calibrate confidence thresholds from canary outcomes (fail-open)
+_interspect_auto_calibrate 2>/dev/null || true
+
 exit 0

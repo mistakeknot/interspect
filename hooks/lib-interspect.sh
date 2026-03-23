@@ -3021,6 +3021,14 @@ _interspect_write_routing_calibration() {
     mv "$tmpfile" "$calibration_path"
 }
 
+# Auto-calibrate confidence thresholds from canary outcomes.
+# Delegates to clavain-cli interspect-calibrate-thresholds if available.
+# Fail-open: errors must not block session teardown.
+_interspect_auto_calibrate() {
+    command -v clavain-cli >/dev/null 2>&1 || return 0
+    clavain-cli interspect-calibrate-thresholds --window-days=30 2>/dev/null || true
+}
+
 # ─── Delegation Calibration (Track B4) ───────────────────────────────────────
 #
 # Computes per-category pass rates from delegation_outcome evidence events.
