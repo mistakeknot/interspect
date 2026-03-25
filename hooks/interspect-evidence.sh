@@ -8,7 +8,8 @@
 # Output: None (silent hook)
 # Exit: 0 always (fail-open)
 
-set -euo pipefail
+set -uo pipefail
+trap 'exit 0' ERR
 
 # Guard: fail-open if dependencies unavailable
 command -v jq &>/dev/null || exit 0
