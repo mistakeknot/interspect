@@ -42,6 +42,18 @@ If already disabled:
 _interspect_set_autonomy "false"
 ```
 
+## Revert All Overrides (--revert-all --confirm)
+
+If the user passed `--revert-all --confirm`:
+1. Read all active overrides from `.claude/routing-overrides.json`
+2. For each, call `_interspect_revert_routing_override "$agent_name"`
+3. Report count of reverted overrides
+
+If `--revert-all` without `--confirm`:
+- Show count of active overrides and ask for confirmation via AskUserQuestion
+
+Note: `--revert-all` is manual-only. The system breaker auto-disable only stops new proposals — it does NOT auto-revert existing overrides.
+
 ## Report
 
 ```
@@ -50,4 +62,5 @@ Autonomous mode **disabled**. Returned to propose mode.
 - Future routing overrides will require `/interspect:approve`
 - Existing overrides and canaries are unaffected
 - Run `/interspect:enable-autonomy` to re-enable
+- Run `/interspect:disable-autonomy --revert-all --confirm` to also revert all active overrides
 ```

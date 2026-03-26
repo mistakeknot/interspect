@@ -109,6 +109,8 @@ MIGRATE
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN source_table TEXT;" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN raw_override_reason TEXT;" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_source_event_id ON evidence(source_event_id);" 2>/dev/null || true
+        # Create sentinels table for TTL caching (og7m.19: system breaker)
+        sqlite3 "$_INTERSPECT_DB" "CREATE TABLE IF NOT EXISTS sentinels (key TEXT PRIMARY KEY, value TEXT NOT NULL);" 2>/dev/null || true
         # Ensure overlays directory exists (Type 1 modifications)
         mkdir -p "$(dirname "$_INTERSPECT_DB")/overlays" 2>/dev/null || true
         # Ensure durable cursor for kernel event consumer (E4.2/E4.5)
@@ -222,6 +224,11 @@ CREATE TABLE IF NOT EXISTS canary_samples (
     UNIQUE(canary_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS idx_canary_samples_canary ON canary_samples(canary_id);
+
+CREATE TABLE IF NOT EXISTS sentinels (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 SQL
     # Migration: add cohort columns to canary table (iv-f7gsz)
     sqlite3 "$db" "ALTER TABLE canary ADD COLUMN project TEXT DEFAULT '';" 2>/dev/null || true
@@ -1656,6 +1663,59 @@ _interspect_circuit_breaker_tripped() {
     (( revert_count >= max_reverts ))
 }
 
+# System-level circuit breaker: auto-disable autonomy when >=50% of agents
+# with evidence have tripped their per-agent circuit breakers.
+# Returns: 0 if system breaker should fire, 1 if system is healthy.
+# Uses 60-second TTL cache to avoid cross-agent table scan per call.
+_interspect_system_breaker_check() {
+    local db="${_INTERSPECT_DB:-}"
+    [[ -z "$db" || ! -f "$db" ]] && return 1
+
+    # TTL cache: check sentinel
+    local sentinel_key="system_breaker_check"
+    local now; now=$(date +%s)
+    local last_check
+    last_check=$(sqlite3 "$db" "SELECT CAST(value AS INTEGER) FROM sentinels WHERE key='$sentinel_key' LIMIT 1" 2>/dev/null) || last_check=0
+    if [[ $((now - last_check)) -lt 60 ]]; then
+        # Use cached result
+        local cached
+        cached=$(sqlite3 "$db" "SELECT value FROM sentinels WHERE key='system_breaker_result' LIMIT 1" 2>/dev/null) || cached="healthy"
+        [[ "$cached" == "tripped" ]] && return 0
+        return 1
+    fi
+
+    # Count agents with evidence
+    local total_agents tripped_agents
+    total_agents=$(sqlite3 "$db" "SELECT COUNT(DISTINCT group_id) FROM modifications WHERE ts > datetime('now', '-30 days')" 2>/dev/null) || total_agents=0
+
+    # Minimum 3-agent floor
+    if [[ $total_agents -lt 3 ]]; then
+        sqlite3 "$db" "INSERT OR REPLACE INTO sentinels(key,value) VALUES('$sentinel_key','$now'),('system_breaker_result','healthy')" 2>/dev/null
+        return 1
+    fi
+
+    # Count agents with >=3 reverts in 30 days (circuit breaker tripped)
+    tripped_agents=$(sqlite3 "$db" "SELECT COUNT(DISTINCT group_id) FROM (
+        SELECT group_id, COUNT(*) as revert_count
+        FROM modifications
+        WHERE status='reverted' AND ts > datetime('now', '-30 days')
+        GROUP BY group_id
+        HAVING revert_count >= 3
+    )" 2>/dev/null) || tripped_agents=0
+
+    # >=50% threshold
+    local result="healthy"
+    if [[ $total_agents -gt 0 ]] && (( tripped_agents * 2 >= total_agents )); then
+        result="tripped"
+    fi
+
+    # Cache result
+    sqlite3 "$db" "INSERT OR REPLACE INTO sentinels(key,value) VALUES('$sentinel_key','$now'),('system_breaker_result','$result')" 2>/dev/null
+
+    [[ "$result" == "tripped" ]] && return 0
+    return 1
+}
+
 # ─── Rate Limiter (iv-003t) ──────────────────────────────────────────────────
 
 # Check global modification rate limit: too many modifications in rolling window?
@@ -1709,6 +1769,17 @@ _interspect_should_auto_apply() {
     # Must be in autonomous mode
     if ! _interspect_is_autonomous; then
         return 1
+    fi
+
+    # System-level circuit breaker — auto-disable autonomy if fleet is degraded
+    if _interspect_system_breaker_check; then
+        echo "[interspect] System breaker tripped: >=50% of agents with evidence have circuit breaker active. Auto-disabling autonomy." >&2
+        _interspect_set_autonomy "false"
+        # Log to modifications table
+        local db="${_INTERSPECT_DB:-}"
+        [[ -n "$db" && -f "$db" ]] && sqlite3 "$db" "INSERT INTO modifications(group_id,ts,tier,mod_type,target_file,status,confidence,evidence_summary) VALUES('_system','$(date -Iseconds)','persistent','system_breaker','.clavain/interspect/confidence.json','applied',0.0,'System breaker: >=50% agents tripped circuit breaker')" 2>/dev/null
+        _INTERSPECT_AUTONOMY=false
+        return 1  # Do not auto-apply
     fi
 
     # Type 3 (prompt tuning overlays) always require propose mode
