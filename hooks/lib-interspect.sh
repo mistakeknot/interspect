@@ -130,6 +130,7 @@ MIGRATE
     # Create tables + indexes + WAL mode
     sqlite3 "$_INTERSPECT_DB" <<'SQL' >/dev/null
 PRAGMA journal_mode=WAL;
+PRAGMA busy_timeout=5000;
 
 CREATE TABLE IF NOT EXISTS evidence (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -241,6 +242,43 @@ SQL
             ic events cursor register interspect-consumer --durable 2>/dev/null || true
         fi
     fi
+}
+
+# ─── Durable write helper ─────────────────────────────────────────────────────
+
+# _interspect_sqlite_write db sql [args...]
+# Wraps sqlite3 with retry on SQLITE_BUSY. 3 attempts with exponential backoff.
+# Logs failures to stderr instead of silently swallowing them.
+_interspect_sqlite_write() {
+    local db="$1"; shift
+    local sql="$1"; shift
+    local attempt=0
+    local max_attempts=3
+    local delays=(1 2 4)
+    local output=""
+    local rc=0
+
+    while [[ $attempt -lt $max_attempts ]]; do
+        output=$(sqlite3 -cmd "PRAGMA busy_timeout=5000;" "$db" "$sql" "$@" 2>&1)
+        rc=$?
+        if [[ $rc -eq 0 ]]; then
+            [[ -n "$output" ]] && echo "$output"
+            return 0
+        fi
+        if echo "$output" | grep -qi "locked\|busy"; then
+            attempt=$((attempt + 1))
+            if [[ $attempt -lt $max_attempts ]]; then
+                sleep "${delays[$((attempt-1))]:-4}"
+            fi
+        else
+            # Non-contention error — don't retry
+            echo "[interspect] sqlite write failed: $output (sql: ${sql:0:80})" >&2
+            return "$rc"
+        fi
+    done
+
+    echo "[interspect] sqlite write failed after $max_attempts attempts (BUSY): ${sql:0:80}" >&2
+    return 5
 }
 
 # ─── Protected paths enforcement ─────────────────────────────────────────────
@@ -1077,7 +1115,7 @@ _interspect_apply_override_locked() {
         esac
 
         # Modification record (confidence from evidence computation above)
-        sqlite3 "$db" "INSERT INTO modifications (group_id, ts, tier, mod_type, target_file, commit_sha, confidence, evidence_summary, status)
+        _interspect_sqlite_write "$db" "INSERT INTO modifications (group_id, ts, tier, mod_type, target_file, commit_sha, confidence, evidence_summary, status)
             VALUES ('${escaped_agent}', '${ts}', 'persistent', 'routing', '${filepath}', '${commit_sha}', ${confidence}, '${escaped_reason}', 'applied');"
 
         # Canary record — baseline + INSERT (iv-f7gsz: agent-scoped)
@@ -1437,7 +1475,7 @@ _interspect_approve_override_locked() {
     escaped_filepath=$(_interspect_sql_escape "$filepath")
 
     # Modification record (guarded — git commit already succeeded, DB failure is non-fatal)
-    if ! sqlite3 "$db" "INSERT INTO modifications (group_id, ts, tier, mod_type, target_file, commit_sha, confidence, evidence_summary, status)
+    if ! _interspect_sqlite_write "$db" "INSERT INTO modifications (group_id, ts, tier, mod_type, target_file, commit_sha, confidence, evidence_summary, status)
         VALUES ('${escaped_agent}', '${ts}', 'persistent', 'routing', '${escaped_filepath}', '${commit_sha}', ${confidence}, '${escaped_reason}', 'applied');"; then
         echo "WARN: Modification record insert failed — override is active but untracked." >&2
     fi
@@ -1564,8 +1602,8 @@ _interspect_revert_override_locked() {
     # Update DB records INSIDE flock
     local escaped_agent
     escaped_agent=$(_interspect_sql_escape "$agent")
-    sqlite3 "$db" "UPDATE canary SET status = 'reverted' WHERE group_id = '${escaped_agent}' AND status = 'active';" 2>/dev/null || true
-    sqlite3 "$db" "UPDATE modifications SET status = 'reverted' WHERE group_id = '${escaped_agent}' AND status = 'applied';" 2>/dev/null || true
+    _interspect_sqlite_write "$db" "UPDATE canary SET status = 'reverted' WHERE group_id = '${escaped_agent}' AND status = 'active';"
+    _interspect_sqlite_write "$db" "UPDATE modifications SET status = 'reverted' WHERE group_id = '${escaped_agent}' AND status = 'applied';"
 }
 
 # ─── Blacklist Management ────────────────────────────────────────────────────
@@ -1586,7 +1624,7 @@ _interspect_blacklist_pattern() {
     local ts
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    sqlite3 "$db" "INSERT OR REPLACE INTO blacklist (pattern_key, blacklisted_at, reason) VALUES ('${escaped_key}', '${ts}', '${escaped_reason}');"
+    _interspect_sqlite_write "$db" "INSERT OR REPLACE INTO blacklist (pattern_key, blacklisted_at, reason) VALUES ('${escaped_key}', '${ts}', '${escaped_reason}');"
 }
 
 # Remove a pattern from the blacklist.
@@ -1690,7 +1728,7 @@ _interspect_system_breaker_check() {
 
     # Minimum 3-agent floor
     if [[ $total_agents -lt 3 ]]; then
-        sqlite3 "$db" "INSERT OR REPLACE INTO sentinels(key,value) VALUES('$sentinel_key','$now'),('system_breaker_result','healthy')" 2>/dev/null
+        _interspect_sqlite_write "$db" "INSERT OR REPLACE INTO sentinels(key,value) VALUES('$sentinel_key','$now'),('system_breaker_result','healthy')"
         return 1
     fi
 
@@ -1710,7 +1748,7 @@ _interspect_system_breaker_check() {
     fi
 
     # Cache result
-    sqlite3 "$db" "INSERT OR REPLACE INTO sentinels(key,value) VALUES('$sentinel_key','$now'),('system_breaker_result','$result')" 2>/dev/null
+    _interspect_sqlite_write "$db" "INSERT OR REPLACE INTO sentinels(key,value) VALUES('$sentinel_key','$now'),('system_breaker_result','$result')"
 
     [[ "$result" == "tripped" ]] && return 0
     return 1
@@ -1777,7 +1815,7 @@ _interspect_should_auto_apply() {
         _interspect_set_autonomy "false"
         # Log to modifications table
         local db="${_INTERSPECT_DB:-}"
-        [[ -n "$db" && -f "$db" ]] && sqlite3 "$db" "INSERT INTO modifications(group_id,ts,tier,mod_type,target_file,status,confidence,evidence_summary) VALUES('_system','$(date -Iseconds)','persistent','system_breaker','.clavain/interspect/confidence.json','applied',0.0,'System breaker: >=50% agents tripped circuit breaker')" 2>/dev/null
+        [[ -n "$db" && -f "$db" ]] && _interspect_sqlite_write "$db" "INSERT INTO modifications(group_id,ts,tier,mod_type,target_file,status,confidence,evidence_summary) VALUES('_system','$(date -Iseconds)','persistent','system_breaker','.clavain/interspect/confidence.json','applied',0.0,'System breaker: >=50% agents tripped circuit breaker')"
         _INTERSPECT_AUTONOMY=false
         return 1  # Do not auto-apply
     fi
@@ -1908,9 +1946,9 @@ _interspect_create_canary_record() {
     local escaped_cohort_key
     escaped_cohort_key=$(_interspect_sql_escape "$cohort_key")
 
-    if ! sqlite3 "$db" "INSERT INTO canary (file, commit_sha, group_id, applied_at, window_uses, window_expires_at, baseline_override_rate, baseline_fp_rate, baseline_finding_density, baseline_window, status, project, cohort_key)
+    if ! _interspect_sqlite_write "$db" "INSERT INTO canary (file, commit_sha, group_id, applied_at, window_uses, window_expires_at, baseline_override_rate, baseline_fp_rate, baseline_finding_density, baseline_window, status, project, cohort_key)
         VALUES ('${escaped_filepath}', '${commit_sha}', '${escaped_group_id}', '${ts}', ${_INTERSPECT_CANARY_WINDOW_USES:-20}, '${expires_at}', ${baseline_values}, 'active', '', '${escaped_cohort_key}');"; then
-        sqlite3 "$db" "UPDATE modifications SET status = 'applied-unmonitored' WHERE commit_sha = '${commit_sha}';" 2>/dev/null || true
+        _interspect_sqlite_write "$db" "UPDATE modifications SET status = 'applied-unmonitored' WHERE commit_sha = '${commit_sha}';"
         echo "WARN: Canary monitoring failed — active but unmonitored." >&2
     fi
 
@@ -2108,11 +2146,11 @@ _interspect_record_canary_sample() {
 
         # Dedup: INSERT OR IGNORE + conditional increment in single transaction (review P1: TOCTOU fix)
         # changes() must be checked in same sqlite3 invocation as the INSERT
-        sqlite3 "$db" "
+        _interspect_sqlite_write "$db" "
             INSERT OR IGNORE INTO canary_samples (canary_id, session_id, ts, override_rate, fp_rate, finding_density)
                 VALUES (${canary_id}, '${escaped_sid}', '${ts}', ${override_rate}, ${fp_rate}, ${finding_density});
             UPDATE canary SET uses_so_far = uses_so_far + 1 WHERE id = ${canary_id} AND changes() > 0;
-        " 2>/dev/null || true
+        "
     done <<< "$canary_rows"
 
     return 0
@@ -2219,7 +2257,7 @@ _interspect_evaluate_canary() {
     local sample_count
     sample_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM canary_samples WHERE canary_id = ${canary_id};")
     if (( sample_count == 0 )); then
-        sqlite3 "$db" "UPDATE canary SET status = 'expired_unused', verdict_reason = 'No sessions during monitoring window' WHERE id = ${canary_id};"
+        _interspect_sqlite_write "$db" "UPDATE canary SET status = 'expired_unused', verdict_reason = 'No sessions during monitoring window' WHERE id = ${canary_id};"
         jq -n --argjson id "$canary_id" --arg agent "$agent" \
             '{canary_id:$id,agent:$agent,status:"expired_unused",reason:"No sessions during monitoring window"}'
         return 0
@@ -2293,7 +2331,7 @@ _interspect_evaluate_canary() {
 
     local escaped_verdict_reason
     escaped_verdict_reason=$(_interspect_sql_escape "$verdict_reason")
-    sqlite3 "$db" "UPDATE canary SET status = '${verdict}', verdict_reason = '${escaped_verdict_reason}' WHERE id = ${canary_id};"
+    _interspect_sqlite_write "$db" "UPDATE canary SET status = '${verdict}', verdict_reason = '${escaped_verdict_reason}' WHERE id = ${canary_id};"
 
     # Check for multiple active canaries — list specific agents (iv-f7gsz)
     local active_count overlap_note=""
@@ -2755,7 +2793,7 @@ _interspect_insert_evidence() {
     local e_source_table="${source_table//\'/\'\'}"
     local e_raw_override_reason="${raw_override_reason//\'/\'\'}"
 
-    sqlite3 "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''));"
+    _interspect_sqlite_write "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''));"
 }
 
 # ─── Session Source Classification (Calibration v2) ──────────────────────────
@@ -2804,7 +2842,7 @@ _interspect_update_session_source() {
 
     local e_sid="${session_id//\'/\'\'}"
     local e_source="${session_source//\'/\'\'}"
-    sqlite3 "$db" "UPDATE sessions SET source = '${e_source}' WHERE session_id = '${e_sid}';" 2>/dev/null || true
+    _interspect_sqlite_write "$db" "UPDATE sessions SET source = '${e_source}' WHERE session_id = '${e_sid}';"
 }
 
 # Record a verdict outcome as evidence.
@@ -3479,7 +3517,7 @@ _interspect_write_overlay_locked() {
     escaped_created_by=$(_interspect_sql_escape "$created_by")
 
     # Modification record (F5: compound group_id)
-    sqlite3 "$db" "INSERT INTO modifications (group_id, ts, tier, mod_type, target_file, commit_sha, confidence, evidence_summary, status)
+    _interspect_sqlite_write "$db" "INSERT INTO modifications (group_id, ts, tier, mod_type, target_file, commit_sha, confidence, evidence_summary, status)
         VALUES ('${group_id}', '${ts}', 'persistent', 'prompt_tuning', '$(_interspect_sql_escape "$rel_path")', '${commit_sha}', 1.0, '${escaped_created_by}', 'applied');"
 
     # Canary record (F5: compound group_id)
@@ -3608,8 +3646,8 @@ _interspect_disable_overlay_locked() {
     escaped_overlay_id=$(_interspect_sql_escape "$overlay_id")
     local group_id="${escaped_agent}/${escaped_overlay_id}"
 
-    sqlite3 "$db" "UPDATE modifications SET status = 'reverted' WHERE group_id = '${group_id}' AND status = 'applied';" 2>/dev/null || true
-    sqlite3 "$db" "UPDATE canary SET status = 'reverted' WHERE group_id = '${group_id}' AND status = 'active';" 2>/dev/null || true
+    _interspect_sqlite_write "$db" "UPDATE modifications SET status = 'reverted' WHERE group_id = '${group_id}' AND status = 'applied';"
+    _interspect_sqlite_write "$db" "UPDATE canary SET status = 'reverted' WHERE group_id = '${group_id}' AND status = 'active';"
 }
 
 # ─── Effectiveness metrics ──────────────────────────────────────────────────
