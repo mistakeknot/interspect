@@ -153,6 +153,10 @@ ALTER TABLE evidence ADD COLUMN source_table TEXT;
 ALTER TABLE evidence ADD COLUMN raw_override_reason TEXT;
 CREATE INDEX IF NOT EXISTS idx_evidence_source_event_id ON evidence(source_event_id);
 
+-- Quarantine column (added rsj.1.4): evidence is excluded from routing
+-- calculations until quarantine_until epoch passes. Default 0 = no quarantine.
+ALTER TABLE evidence ADD COLUMN quarantine_until INTEGER DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     start_ts TEXT NOT NULL,
@@ -528,6 +532,7 @@ _interspect_get_classified_patterns() {
 
     # Query with normalization: merge interflux:fd-X and interflux:review:fd-X
     # into fd-X for routing-eligible patterns. Non-fd-* sources pass through unchanged.
+    # Quarantine filter: exclude evidence still within quarantine period (rsj.1.4).
     sqlite3 -separator '|' "$db" "
         SELECT
             CASE
@@ -539,6 +544,7 @@ _interspect_get_classified_patterns() {
             COUNT(*) as ec, COUNT(DISTINCT session_id) as sc,
             COUNT(DISTINCT project) as pc
         FROM evidence
+        WHERE COALESCE(quarantine_until, 0) <= CAST(strftime('%s', 'now') AS INTEGER)
         GROUP BY norm_source, event, override_reason
         HAVING COUNT(*) >= 2 ORDER BY ec DESC;
     " | while IFS='|' read -r src evt reason ec sc pc; do
@@ -627,9 +633,11 @@ _interspect_is_routing_eligible() {
 
     # Get agent_wrong percentage — query all name variants (fd-X, interflux:fd-X, interflux:review:fd-X)
     # Include both manual overrides and disagreement-pipeline overrides
+    # Quarantine filter: exclude evidence still within quarantine period (rsj.1.4)
     local total wrong pct
-    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override');")
-    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
+    local _qf="AND COALESCE(quarantine_until, 0) <= CAST(strftime('%s', 'now') AS INTEGER)"
+    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') ${_qf};")
+    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated') ${_qf};")
 
     if (( total == 0 )); then
         echo "not_eligible:no_override_events"
@@ -682,11 +690,13 @@ _interspect_get_routing_eligible() {
         fi
 
         # Get pct from multi-variant query (same as _interspect_is_routing_eligible uses)
+        # Quarantine filter: exclude evidence still within quarantine period (rsj.1.4)
         local escaped
         escaped=$(_interspect_sql_escape "$src")
         local total wrong pct
-        total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override');")
-        wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
+        local _qf="AND COALESCE(quarantine_until, 0) <= CAST(strftime('%s', 'now') AS INTEGER)"
+        total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') ${_qf};")
+        wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated') ${_qf};")
         pct=$(( total > 0 ? wrong * 100 / total : 0 ))
 
         echo "${src}|${ec}|${sc}|${pc}|${pct}"
@@ -2781,6 +2791,14 @@ _interspect_insert_evidence() {
     local source_version
     source_version=$(git rev-parse --short HEAD 2>/dev/null || echo "")
 
+    # Quarantine: evidence is excluded from routing queries until this epoch.
+    # INTERSPECT_QUARANTINE_HOURS=0 disables quarantine (all evidence immediate).
+    local quarantine_hours="${INTERSPECT_QUARANTINE_HOURS:-48}"
+    local quarantine_until=0
+    if [[ "$quarantine_hours" -gt 0 ]] 2>/dev/null; then
+        quarantine_until=$(( $(date +%s) + quarantine_hours * 3600 ))
+    fi
+
     # SQL-escape all values (double single quotes)
     local e_session="${session_id//\'/\'\'}"
     local e_source="${source//\'/\'\'}"
@@ -2793,7 +2811,7 @@ _interspect_insert_evidence() {
     local e_source_table="${source_table//\'/\'\'}"
     local e_raw_override_reason="${raw_override_reason//\'/\'\'}"
 
-    _interspect_sqlite_write "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''));"
+    _interspect_sqlite_write "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason, quarantine_until) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''), ${quarantine_until});"
 }
 
 # ─── Session Source Classification (Calibration v2) ──────────────────────────

@@ -103,7 +103,9 @@ Week       | Count | Histogram
 
 ```bash
 RECENT=$(sqlite3 -separator ' | ' "$DB" "
-    SELECT ts, event, COALESCE(override_reason, '-'), substr(context, 1, 120)
+    SELECT ts, event, COALESCE(override_reason, '-'),
+        CASE WHEN COALESCE(quarantine_until, 0) > CAST(strftime('%s', 'now') AS INTEGER)
+            THEN '[Q] ' ELSE '' END || substr(context, 1, 120)
     FROM evidence
     WHERE source = '${E_AGENT}'
     ORDER BY ts DESC
