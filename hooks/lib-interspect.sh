@@ -109,6 +109,8 @@ MIGRATE
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN source_table TEXT;" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN raw_override_reason TEXT;" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_source_event_id ON evidence(source_event_id);" 2>/dev/null || true
+        # Add quarantine column to evidence (rsj.1.4: evidence quarantine)
+        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN quarantine_until INTEGER DEFAULT 0;" 2>/dev/null || true
         # Create sentinels table for TTL caching (og7m.19: system breaker)
         sqlite3 "$_INTERSPECT_DB" "CREATE TABLE IF NOT EXISTS sentinels (key TEXT PRIMARY KEY, value TEXT NOT NULL);" 2>/dev/null || true
         # Ensure overlays directory exists (Type 1 modifications)
@@ -2738,7 +2740,7 @@ _interspect_sanitize() {
 _interspect_validate_hook_id() {
     local hook_id="$1"
     case "$hook_id" in
-        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-execution-defect|interspect-verdict|interspect-delegation)
+        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-execution-defect|interspect-verdict|interspect-delegation|interspect-decomposition)
             return 0
             ;;
         *)
@@ -2896,6 +2898,76 @@ _interspect_record_verdict() {
         "interspect-verdict"
 }
 
+# ─── Decomposition Quality Measurement (rsj.1.9.1) ──────────────────────────
+
+# Emit a decomposition_outcome event for calibration.
+# Called from reflect.md after a sprint that decomposed an epic.
+#
+# Metric schema:
+#   epic_id           — the epic bead that was decomposed
+#   predicted_children — child count recorded at strategy time
+#   actual_children    — child count at reflect time
+#   completion_rate    — fraction of children closed (0.0-1.0)
+#   replan_count       — number of children added/removed after initial decomposition
+#   intent_survival    — fraction of original children still present (0.0-1.0)
+#   complexity         — epic complexity at decomposition time
+#   baseline_typical   — the p50 baseline used for the prediction
+#
+# Args: $1=session_id $2=epic_id $3=predicted_children $4=actual_children
+#       $5=completion_rate $6=replan_count $7=intent_survival $8=complexity
+#       $9=baseline_typical
+_interspect_emit_decomposition_outcome() {
+    local session_id="${1:?session_id required}"
+    local epic_id="${2:?epic_id required}"
+    local predicted_children="${3:?predicted_children required}"
+    local actual_children="${4:?actual_children required}"
+    local completion_rate="${5:-0}"
+    local replan_count="${6:-0}"
+    local intent_survival="${7:-1.0}"
+    local complexity="${8:-3}"
+    local baseline_typical="${9:-5}"
+
+    _interspect_ensure_db || return 1
+
+    local context
+    context=$(jq -n \
+        --arg epic "$epic_id" \
+        --argjson predicted "$predicted_children" \
+        --argjson actual "$actual_children" \
+        --argjson completion "$completion_rate" \
+        --argjson replan "$replan_count" \
+        --argjson survival "$intent_survival" \
+        --argjson complexity "$complexity" \
+        --argjson baseline "$baseline_typical" \
+        '{epic_id: $epic, predicted_children: $predicted, actual_children: $actual,
+          completion_rate: $completion, replan_count: $replan,
+          intent_survival: $survival, complexity: $complexity,
+          baseline_typical: $baseline}') || context="{}"
+
+    _interspect_insert_evidence \
+        "$session_id" \
+        "decomposition" \
+        "decomposition_outcome" \
+        "" \
+        "$context" \
+        "interspect-decomposition"
+}
+
+# Check if decomposition calibration has enough events to trigger.
+# Returns 0 (true) if event count >= threshold, 1 otherwise.
+# Prints the current event count to stdout.
+# Args: $1=threshold (default: 30)
+_interspect_decomposition_calibration_ready() {
+    local threshold="${1:-30}"
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || { echo "0"; return 1; }
+
+    local count
+    count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event = 'decomposition_outcome' AND quarantine_until <= $(date +%s);" 2>/dev/null) || count=0
+
+    echo "$count"
+    [[ "$count" -ge "$threshold" ]]
+}
 
 # Sweep unrecorded verdict files from quality-gates runs.
 # Called by SessionStart hook to catch verdicts the previous session didn't record.
