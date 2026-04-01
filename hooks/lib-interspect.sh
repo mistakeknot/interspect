@@ -3226,6 +3226,22 @@ _interspect_write_routing_calibration() {
 _interspect_auto_calibrate() {
     command -v clavain-cli >/dev/null 2>&1 || return 0
     clavain-cli interspect-calibrate-thresholds --window-days=30 2>/dev/null || true
+
+    # Decomposition quality calibration (rsj.1.9)
+    # Runs calibrate-decomposition.py when >=30 decomposition_outcome events exist.
+    local _decomp_count
+    _decomp_count=$(_interspect_decomposition_calibration_ready 30 2>/dev/null) || return 0
+    if [[ "$_decomp_count" -ge 30 ]] 2>/dev/null; then
+        local _db _project_root _clavain_script _clavain_config
+        _db=$(_interspect_db_path 2>/dev/null) || return 0
+        # DB path is <root>/.clavain/interspect/interspect.db — project root is 3 dirs up
+        _project_root=$(dirname "$(dirname "$(dirname "$_db")")")
+        _clavain_script="${_project_root}/os/Clavain/scripts/calibrate-decomposition.py"
+        _clavain_config="${_project_root}/os/Clavain/config/decomposition-calibration.yaml"
+        if [[ -f "$_clavain_script" && -f "$_clavain_config" ]]; then
+            python3 "$_clavain_script" --db "$_db" --config "$_clavain_config" 2>/dev/null || true
+        fi
+    fi
 }
 
 # ─── Delegation Calibration (Track B4) ───────────────────────────────────────
