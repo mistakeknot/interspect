@@ -2740,7 +2740,7 @@ _interspect_sanitize() {
 _interspect_validate_hook_id() {
     local hook_id="$1"
     case "$hook_id" in
-        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-execution-defect|interspect-verdict|interspect-delegation|interspect-decomposition|sprint-review-calibration)
+        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-execution-defect|interspect-verdict|interspect-delegation|interspect-decomposition|interspect-reaction|sprint-review-calibration)
             return 0
             ;;
         *)
@@ -2951,6 +2951,98 @@ _interspect_emit_decomposition_outcome() {
         "" \
         "$context" \
         "interspect-decomposition"
+}
+
+# ─── Reaction round evidence ─────────────────────────────────────────────────
+
+# Emit reaction-dispatched event (Phase 2.5, after reaction agents complete).
+# Args: $1=session_id, $2=review_id, $3=input_path, $4=agents_dispatched,
+#       $5=reactions_produced, $6=reactions_empty, $7=reactions_errors,
+#       $8=convergence_before (overlap_ratio from gate), $9=agent_count,
+#       $10=fixative_injections
+_interspect_emit_reaction_dispatched() {
+    local session_id="${1:?session_id required}"
+    local review_id="${2:?review_id required}"
+    local input_path="${3:-}"
+    local agents_dispatched="${4:-0}"
+    local reactions_produced="${5:-0}"
+    local reactions_empty="${6:-0}"
+    local reactions_errors="${7:-0}"
+    local convergence_before="${8:-0}"
+    local agent_count="${9:-0}"
+    local fixative_injections="${10:-0}"
+
+    _interspect_ensure_db || return 1
+
+    local context
+    context=$(jq -n \
+        --arg type "dispatched" \
+        --arg rid "$review_id" \
+        --arg ipath "$input_path" \
+        --argjson dispatched "$agents_dispatched" \
+        --argjson produced "$reactions_produced" \
+        --argjson empty "$reactions_empty" \
+        --argjson errors "$reactions_errors" \
+        --argjson conv_before "$convergence_before" \
+        --argjson ac "$agent_count" \
+        --argjson fix "$fixative_injections" \
+        '{type: $type, review_id: $rid, input_path: $ipath,
+          agents_dispatched: $dispatched, reactions_produced: $produced,
+          reactions_empty: $empty, reactions_errors: $errors,
+          convergence_before: $conv_before, agent_count: $ac,
+          fixative_injections: $fix}') || context="{}"
+
+    _interspect_insert_evidence \
+        "$session_id" \
+        "reaction" \
+        "reaction_dispatched" \
+        "" \
+        "$context" \
+        "interspect-reaction"
+}
+
+# Emit reaction-outcome event (after Phase 3 synthesis completes).
+# Args: $1=session_id, $2=review_id, $3=convergence_after,
+#       $4=sycophancy_flags (JSON array), $5=discourse_health (JSON object),
+#       $6=hearsay_count, $7=independent_count, $8=contested_count,
+#       $9=minority_preserved (true/false)
+_interspect_emit_reaction_outcome() {
+    local session_id="${1:?session_id required}"
+    local review_id="${2:?review_id required}"
+    local convergence_after="${3:-0}"
+    local sycophancy_flags="${4:-[]}"
+    local _empty_obj='{}'
+    local discourse_health="${5:-$_empty_obj}"
+    local hearsay_count="${6:-0}"
+    local independent_count="${7:-0}"
+    local contested_count="${8:-0}"
+    local minority_preserved="${9:-false}"
+
+    _interspect_ensure_db || return 1
+
+    local context
+    context=$(jq -n \
+        --arg type "outcome" \
+        --arg rid "$review_id" \
+        --argjson conv_after "$convergence_after" \
+        --argjson syco "$sycophancy_flags" \
+        --argjson health "$discourse_health" \
+        --argjson hearsay "$hearsay_count" \
+        --argjson independent "$independent_count" \
+        --argjson contested "$contested_count" \
+        --argjson minority "$minority_preserved" \
+        '{type: $type, review_id: $rid, convergence_after: $conv_after,
+          sycophancy_flags: $syco, discourse_health: $health,
+          hearsay_count: $hearsay, independent_count: $independent,
+          contested_count: $contested, minority_preserved: $minority}') || context="{}"
+
+    _interspect_insert_evidence \
+        "$session_id" \
+        "reaction" \
+        "reaction_outcome" \
+        "" \
+        "$context" \
+        "interspect-reaction"
 }
 
 # Check if decomposition calibration has enough events to trigger.
