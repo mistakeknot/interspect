@@ -2867,13 +2867,14 @@ _interspect_update_session_source() {
 
 # Record a verdict outcome as evidence.
 # Called from quality-gates call site (not from lib-verdict.sh).
-# Args: $1=session_id $2=agent_name $3=status $4=findings_count $5=model_used
+# Args: $1=session_id $2=agent_name $3=status $4=findings_count $5=model_used $6=phase(optional)
 _interspect_record_verdict() {
     local session_id="${1:?session_id required}"
     local agent_name="${2:?agent_name required}"
     local status="${3:?status required}"
     local findings_count="${4:-0}"
     local model_used="${5:-unknown}"
+    local phase="${6:-${CLAVAIN_PHASE:-${CLAVAIN_CURRENT_PHASE:-}}}"
 
     # Ensure DB is set (consistent path for all inserts)
     _interspect_ensure_db || return 1
@@ -2887,7 +2888,8 @@ _interspect_record_verdict() {
         --arg status "$status" \
         --argjson findings "$findings_count" \
         --arg model "$model_used" \
-        '{status: $status, findings_count: $findings, model_used: $model}') || context="{}"
+        --arg phase "$phase" \
+        '{status: $status, findings_count: $findings, model_used: $model} + (if $phase != "" then {phase: $phase} else {} end)') || context="{}"
 
     _interspect_insert_evidence \
         "$session_id" \
@@ -3161,6 +3163,26 @@ for row in data:
     echo "$yaml_content" > "$output_path"
 }
 
+# Return a stable digest for a verdict file. Used to make sweep markers
+# content-aware instead of filename-only; quality-gates rewrites the same
+# <agent>.json path on later runs.
+_interspect_verdict_file_digest() {
+    local file="$1"
+    local digest rest
+    if command -v sha256sum >/dev/null 2>&1; then
+        read -r digest rest < <(sha256sum "$file")
+        echo "$digest"
+        return 0
+    fi
+    if command -v shasum >/dev/null 2>&1; then
+        read -r digest rest < <(shasum -a 256 "$file")
+        echo "$digest"
+        return 0
+    fi
+    # Last-resort fallback for very small/plugin-constrained environments.
+    wc -c < "$file" | tr -d '[:space:]'
+}
+
 # Sweep unrecorded verdict files from quality-gates runs.
 # Called by SessionStart hook to catch verdicts the previous session didn't record.
 # Idempotent: tracks recorded verdicts via marker files in the verdicts directory.
@@ -3183,18 +3205,27 @@ _interspect_sweep_verdicts() {
         # Skip non-verdict files (synthesis, etc.)
         [[ "$verdict_name" == "synthesis" ]] && continue
 
-        # Check marker file for idempotency
+        # Check content-aware marker for idempotency. The same verdict filename
+        # is reused across quality-gates runs, so a filename-only marker would
+        # permanently suppress later verdicts from the same agent.
         local marker="${verdicts_dir}/.recorded-${verdict_name}"
+        local verdict_hash marker_hash
+        verdict_hash=$(_interspect_verdict_file_digest "$verdict_file" 2>/dev/null || echo "")
+        marker_hash=""
         if [[ -f "$marker" ]]; then
-            skipped=$((skipped + 1))
-            continue
+            marker_hash=$(sed -n 's/^content_hash=//p' "$marker" 2>/dev/null | head -n 1) || marker_hash=""
+            if [[ -n "$verdict_hash" && "$marker_hash" == "$verdict_hash" ]]; then
+                skipped=$((skipped + 1))
+                continue
+            fi
         fi
 
         # Extract verdict data
-        local status findings model origin_sid
+        local status findings model phase origin_sid
         status=$(jq -r '.status // "UNKNOWN"' "$verdict_file" 2>/dev/null) || continue
         findings=$(jq -r '.findings_count // 0' "$verdict_file" 2>/dev/null) || findings=0
         model=$(jq -r '.model // "unknown"' "$verdict_file" 2>/dev/null) || model="unknown"
+        phase=$(jq -r '.phase // empty' "$verdict_file" 2>/dev/null) || phase=""
 
         # Use originating session_id from verdict JSON if available (Demarch-k1b fix).
         # Falls back to sweep session_id for legacy verdicts without the field.
@@ -3203,12 +3234,15 @@ _interspect_sweep_verdicts() {
 
         # Record the verdict event (capture exit code before local)
         local rc
-        _interspect_record_verdict "$origin_sid" "$verdict_name" "$status" "$findings" "$model"
+        _interspect_record_verdict "$origin_sid" "$verdict_name" "$status" "$findings" "$model" "$phase"
         rc=$?
 
         if [[ $rc -eq 0 ]]; then
             # Write marker atomically (tmp+mv prevents partial marker on crash)
-            printf 'recorded_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${marker}.tmp" \
+            {
+                printf 'recorded_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                printf 'content_hash=%s\n' "$verdict_hash"
+            } > "${marker}.tmp" \
                 && mv "${marker}.tmp" "$marker"
             recorded=$((recorded + 1))
         fi
@@ -3243,118 +3277,174 @@ _interspect_compute_agent_scores() {
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || { echo "[]"; return 0; }
 
-    # Query: normalize agent names, join sessions for source weighting
-    local raw
-    raw=$(sqlite3 -json "$db" "
-        SELECT
-            CASE
-                WHEN e.source LIKE 'interflux:review:%' THEN SUBSTR(e.source, INSTR(e.source, ':') + INSTR(SUBSTR(e.source, INSTR(e.source, ':') + 1), ':') + 1)
-                WHEN e.source LIKE 'interflux:%' THEN SUBSTR(e.source, 11)
-                ELSE e.source
-            END as agent,
-            e.event,
-            json_extract(e.context, '$.status') as verdict_status,
-            json_extract(e.context, '$.findings_count') as findings_count,
-            json_extract(e.context, '$.model_used') as model_used,
-            e.session_id,
-            COALESCE(s.source, 'bootstrap') as session_source
-        FROM evidence e
-        LEFT JOIN sessions s ON e.session_id = s.session_id
-        WHERE e.event IN ('agent_dispatch', 'verdict_outcome', 'override', 'disagreement_override')
-        ORDER BY agent, e.ts
-    " 2>/dev/null) || raw="[]"
+    python3 - "$db" \
+        "$_INTERSPECT_CALIBRATION_MIN_SESSIONS" \
+        "$_INTERSPECT_CALIBRATION_MIN_NON_BOOTSTRAP" \
+        "$_INTERSPECT_CALIBRATION_HIT_THRESHOLD_HIGH" \
+        "$_INTERSPECT_CALIBRATION_HIT_THRESHOLD_LOW" \
+        "$_INTERSPECT_SOURCE_WEIGHT_BOOTSTRAP" \
+        "$_INTERSPECT_SOURCE_WEIGHT_SELF_BUILDING" \
+        "$_INTERSPECT_SOURCE_WEIGHT_NORMAL" \
+        "$_INTERSPECT_SAFETY_FLOOR_AGENTS" <<'PY' 2>/dev/null || echo "[]"
+import json
+import sqlite3
+import sys
+from collections import defaultdict
 
-    [[ "$raw" == "[]" || -z "$raw" ]] && { echo "[]"; return 0; }
+(db_path, min_sessions_raw, min_non_bootstrap_raw, hit_high_raw, hit_low_raw,
+ w_bootstrap_raw, w_self_building_raw, w_normal_raw, safety_agents_raw) = sys.argv[1:10]
 
-    # Count non-bootstrap sessions for threshold check
-    local non_bootstrap_count
-    non_bootstrap_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM sessions WHERE COALESCE(source, 'normal') != 'bootstrap';" 2>/dev/null) || non_bootstrap_count=0
+min_sessions = int(float(min_sessions_raw))
+min_non_bootstrap = int(float(min_non_bootstrap_raw))
+hit_high = float(hit_high_raw)
+hit_low = float(hit_low_raw)
+source_weights = {
+    "bootstrap": float(w_bootstrap_raw),
+    "self-building": float(w_self_building_raw),
+    "normal": float(w_normal_raw),
+}
+safety_agents = set(safety_agents_raw.split())
 
-    # Process with jq: group by agent, compute weighted scores
-    echo "$raw" | jq -c --argjson min_sessions "$_INTERSPECT_CALIBRATION_MIN_SESSIONS" \
-        --argjson min_non_bootstrap "$_INTERSPECT_CALIBRATION_MIN_NON_BOOTSTRAP" \
-        --argjson non_bootstrap_count "$non_bootstrap_count" \
-        --argjson hit_high "$_INTERSPECT_CALIBRATION_HIT_THRESHOLD_HIGH" \
-        --argjson hit_low "$_INTERSPECT_CALIBRATION_HIT_THRESHOLD_LOW" \
-        --argjson w_bootstrap "$_INTERSPECT_SOURCE_WEIGHT_BOOTSTRAP" \
-        --argjson w_self_building "$_INTERSPECT_SOURCE_WEIGHT_SELF_BUILDING" \
-        --argjson w_normal "$_INTERSPECT_SOURCE_WEIGHT_NORMAL" \
-        --arg safety_agents "$_INTERSPECT_SAFETY_FLOOR_AGENTS" '
 
-        # Source weight lookup
-        def source_weight:
-            if . == "bootstrap" then $w_bootstrap
-            elif . == "self-building" then $w_self_building
-            else $w_normal
-            end;
+def as_int(value, default=0):
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
 
-        group_by(.agent) | map(
-            .[0].agent as $agent |
-            [.[] | select(.event == "verdict_outcome")] as $verdicts |
-            [.[] | select(.event == "agent_dispatch")] as $dispatches |
-            ([.[] | .session_id] | unique | length) as $sessions |
-            ($verdicts | length) as $verdict_count |
-            ($verdicts | map(.findings_count // 0 | tonumber) | add // 0) as $total_findings |
-            ($verdicts | map(select(.verdict_status == "NEEDS_ATTENTION")) | length) as $attention_count |
 
-            # Weighted hit rate: sum(weight * attention) / sum(weight * total)
-            ($verdicts | map(
-                (.session_source // "normal" | source_weight) as $w |
-                {w: $w, attention: (if .verdict_status == "NEEDS_ATTENTION" then 1 else 0 end)}
-            )) as $weighted |
-            ($weighted | map(.w) | add // 0) as $total_weight |
-            ($weighted | map(.w * .attention) | add // 0) as $weighted_attention |
+def rounded(value):
+    return round(float(value), 2)
 
-            # Skip agents with insufficient evidence
-            if $sessions < $min_sessions then
-                {agent: $agent, evidence_sessions: $sessions, skip: true, reason: "insufficient_sessions"}
-            elif $verdict_count == 0 then
-                {agent: $agent, evidence_sessions: $sessions, skip: true, reason: "no_verdicts"}
-            elif $total_findings == 0 then
-                {agent: $agent, evidence_sessions: $sessions, hit_rate: null, skip: true, reason: "insufficient_findings"}
-            else
-                ($attention_count / $verdict_count) as $hit_rate |
-                (if $total_weight > 0 then $weighted_attention / $total_weight else $hit_rate end) as $weighted_hit_rate |
-                (if $sessions >= 5 then 0.85
-                 elif $sessions >= 3 then 0.7
-                 else 0.5 end) as $confidence |
 
-                # Use weighted hit rate for recommendations
-                ($safety_agents | split(" ") | any(. == $agent)) as $is_safety |
-                (if $weighted_hit_rate >= $hit_high then "sonnet"
-                 elif $weighted_hit_rate < $hit_low then
-                    if $is_safety then "sonnet"
-                    else "haiku"
-                    end
-                 else null  # no change — insufficient signal
-                 end) as $recommended |
+def source_weight(source):
+    return source_weights.get(source or "normal", source_weights["normal"])
 
-                # Check non-bootstrap threshold for propagation eligibility
-                ($non_bootstrap_count >= $min_non_bootstrap) as $propagation_eligible |
 
-                {
-                    agent: $agent,
-                    evidence_sessions: $sessions,
-                    hit_rate: ($hit_rate * 100 | round / 100),
-                    weighted_hit_rate: ($weighted_hit_rate * 100 | round / 100),
-                    confidence: $confidence,
-                    recommended_model: ($recommended // "sonnet"),
-                    current_model: "sonnet",
-                    propagation_eligible: $propagation_eligible,
-                    reason: (
-                        if $recommended == null then "weighted_hit_rate in dead zone (0.3-0.6), no change"
-                        elif ($propagation_eligible | not) then "insufficient non-bootstrap sessions (\($non_bootstrap_count)/\($min_non_bootstrap))"
-                        elif $is_safety and $weighted_hit_rate < $hit_low then "low hit rate but safety floor prevents demotion"
-                        elif $weighted_hit_rate >= $hit_high then "high weighted hit rate, appropriate tier"
-                        elif $weighted_hit_rate < $hit_low then "low weighted hit rate, recommend demotion"
-                        else "moderate weighted hit rate"
-                        end
-                    ),
-                    skip: false
-                }
-            end
-        ) | [.[] | select(.skip != true)]
-    ' 2>/dev/null || echo "[]"
+def reason_for(recommended, propagation_eligible, is_safety, weighted_hit_rate, non_bootstrap_count):
+    if recommended is None:
+        return "weighted_hit_rate in dead zone (0.3-0.6), no change"
+    if not propagation_eligible:
+        return f"insufficient non-bootstrap sessions ({non_bootstrap_count}/{min_non_bootstrap})"
+    if is_safety and weighted_hit_rate < hit_low:
+        return "low hit rate but safety floor prevents demotion"
+    if weighted_hit_rate >= hit_high:
+        return "high weighted hit rate, appropriate tier"
+    if weighted_hit_rate < hit_low:
+        return "low weighted hit rate, recommend demotion"
+    return "moderate weighted hit rate"
+
+
+def score_subset(agent, rows, non_bootstrap_count):
+    verdicts = [row for row in rows if row["event"] == "verdict_outcome"]
+    sessions = {row["session_id"] for row in rows if row.get("session_id")}
+    verdict_count = len(verdicts)
+    total_findings = sum(as_int(row.get("findings_count")) for row in verdicts)
+    attention_count = sum(1 for row in verdicts if row.get("verdict_status") == "NEEDS_ATTENTION")
+
+    if len(sessions) < min_sessions or verdict_count == 0 or total_findings == 0:
+        return None
+
+    total_weight = sum(source_weight(row.get("session_source")) for row in verdicts)
+    weighted_attention = sum(
+        source_weight(row.get("session_source")) * (1 if row.get("verdict_status") == "NEEDS_ATTENTION" else 0)
+        for row in verdicts
+    )
+    hit_rate = attention_count / verdict_count
+    weighted_hit_rate = weighted_attention / total_weight if total_weight > 0 else hit_rate
+    confidence = 0.85 if len(sessions) >= 5 else 0.7 if len(sessions) >= 3 else 0.5
+    is_safety = agent in safety_agents
+    if weighted_hit_rate >= hit_high:
+        recommended = "sonnet"
+    elif weighted_hit_rate < hit_low:
+        recommended = "sonnet" if is_safety else "haiku"
+    else:
+        recommended = None
+    propagation_eligible = non_bootstrap_count >= min_non_bootstrap
+    return {
+        "agent": agent,
+        "evidence_sessions": len(sessions),
+        "hit_rate": rounded(hit_rate),
+        "weighted_hit_rate": rounded(weighted_hit_rate),
+        "confidence": confidence,
+        "recommended_model": recommended or "sonnet",
+        "current_model": "sonnet",
+        "propagation_eligible": propagation_eligible,
+        "reason": reason_for(recommended, propagation_eligible, is_safety, weighted_hit_rate, non_bootstrap_count),
+        "skip": False,
+    }
+
+
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+non_bootstrap_count = conn.execute(
+    "SELECT COUNT(*) FROM sessions WHERE COALESCE(source, 'normal') != 'bootstrap'"
+).fetchone()[0]
+rows = conn.execute(
+    """
+    SELECT
+        CASE
+            WHEN e.source LIKE 'interflux:review:%' THEN SUBSTR(e.source, INSTR(e.source, ':') + INSTR(SUBSTR(e.source, INSTR(e.source, ':') + 1), ':') + 1)
+            WHEN e.source LIKE 'interflux:%' THEN SUBSTR(e.source, 11)
+            ELSE e.source
+        END AS agent,
+        e.event,
+        e.context AS context,
+        e.session_id,
+        COALESCE(s.source, 'bootstrap') AS session_source
+    FROM evidence e
+    LEFT JOIN sessions s ON e.session_id = s.session_id
+    WHERE e.event IN ('agent_dispatch', 'verdict_outcome', 'override', 'disagreement_override')
+    ORDER BY agent, e.ts
+    """
+).fetchall()
+
+groups = defaultdict(list)
+for row in rows:
+    item = dict(row)
+    try:
+        context = json.loads(item.get("context") or "{}")
+    except json.JSONDecodeError:
+        context = {}
+    item["verdict_status"] = context.get("status")
+    item["findings_count"] = context.get("findings_count")
+    item["model_used"] = context.get("model_used")
+    item["phase"] = context.get("phase")
+    item.pop("context", None)
+    agent = item.get("agent") or "unknown"
+    groups[agent].append(item)
+
+out = []
+for agent in sorted(groups):
+    agent_rows = groups[agent]
+    scored = score_subset(agent, agent_rows, non_bootstrap_count)
+    phase_groups = defaultdict(list)
+    for row in agent_rows:
+        phase = (row.get("phase") or "").strip()
+        if phase:
+            phase_groups[phase].append(row)
+    phases = {}
+    for phase in sorted(phase_groups):
+        phase_score = score_subset(agent, phase_groups[phase], non_bootstrap_count)
+        if phase_score:
+            phase_score.pop("agent", None)
+            phase_score.pop("skip", None)
+            phases[phase] = phase_score
+    if scored:
+        if phases:
+            scored["phases"] = phases
+        scored.pop("skip", None)
+        out.append(scored)
+    elif phases:
+        first = next(iter(phases.values())).copy()
+        first["agent"] = agent
+        first["phases"] = phases
+        out.append(first)
+
+print(json.dumps(out, separators=(",", ":")))
+PY
 }
 
 # Write routing calibration file atomically.
@@ -3397,7 +3487,8 @@ _interspect_write_routing_calibration() {
                 evidence_sessions: $a.evidence_sessions,
                 confidence: $a.confidence,
                 propagation_eligible: $a.propagation_eligible,
-                reason: $a.reason
+                reason: $a.reason,
+                phases: ($a.phases // {})
             }}))
         }
     ' 2>/dev/null) || return 1
