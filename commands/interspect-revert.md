@@ -1,7 +1,7 @@
 ---
 name: interspect-revert
-description: Revert a routing override and optionally blacklist the pattern
-argument-hint: "<agent-name or commit-sha>"
+description: Revert a routing override (agent), an agent overlay, or a tool remediation
+argument-hint: "<agent-name> | tool:<source> | <commit-sha>"
 ---
 
 # Interspect Revert
@@ -29,7 +29,10 @@ DB=$(_interspect_db_path)
 
 ## Parse Target
 
-If argument looks like a git SHA (7+ hex chars), target by commit. Otherwise, target by agent name.
+Three target shapes:
+- `tool:<source>` — disable a tool remediation (sfhq.4). Strip the `tool:` prefix into `TOOL_SOURCE`, set `KIND=tool`, skip directly to "Tool Remediation Revert" below.
+- 7+ hex chars — target by commit SHA.
+- Otherwise — target by agent name (`AGENT`), set `KIND=agent`.
 
 ## Disambiguation Check (F7)
 
@@ -177,3 +180,71 @@ Disabled {count} overlay(s) for **{agent}**: {overlay_ids joined}.
 {if not blacklisted: "Interspect may re-propose overlays if new evidence warrants it."}
 Canary monitoring closed for disabled overlays.
 ```
+
+## Tool Remediation Revert
+
+(Only runs if `KIND=tool` from "Parse Target")
+
+### List Active Tool Remediations
+
+```bash
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+TR_DIR="${ROOT}/.clavain/interspect/tool-remediations/${TOOL_SOURCE}"
+
+if [[ ! -d "$TR_DIR" ]]; then
+    echo "No tool remediations found for ${TOOL_SOURCE}."
+    exit 0
+fi
+
+ACTIVE_REMEDIATIONS=()
+for remediation_file in "$TR_DIR"/*.md; do
+    [[ -f "$remediation_file" ]] || continue
+    if _interspect_overlay_is_active "$remediation_file"; then
+        overlay_id=$(basename "$remediation_file" .md)
+        body=$(_interspect_overlay_body "$remediation_file")
+        preview=$(echo "$body" | head -c 120)
+        ACTIVE_REMEDIATIONS+=("$overlay_id|$preview")
+    fi
+done
+
+if [[ ${#ACTIVE_REMEDIATIONS[@]} -eq 0 ]]; then
+    echo "No active tool remediations for ${TOOL_SOURCE}."
+    exit 0
+fi
+```
+
+### Select Remediations to Disable
+
+If only one active: confirm disable directly.
+
+If multiple: present via AskUserQuestion (multi-select):
+```
+Which tool remediations do you want to disable for tool:{TOOL_SOURCE}?
+
+Options:
+- "{overlay_id_1} — {preview_1}"
+- "{overlay_id_2} — {preview_2}"
+- "All remediations" — Disable all {count} active
+```
+
+### Disable Selected
+
+For each selected overlay_id:
+```bash
+_interspect_disable_tool_remediation "$TOOL_SOURCE" "$overlay_id"
+```
+
+This sets `active: false` in the file frontmatter, marks the canary as `disabled` with `verdict_reason='user_disabled'`, and git commits.
+
+### Report
+
+```
+Disabled {count} tool remediation(s) for **tool:{TOOL_SOURCE}**: {overlay_ids joined}.
+Canary monitoring closed.
+The CLAUDE.md rules added at apply time were NOT auto-removed — review your CLAUDE.md
+under "## Tool Usage" and remove obsolete entries manually if desired.
+```
+
+Note: tool remediations don't have a routing-override-style blacklist concept — patterns
+will surface again if new tool-time evidence accumulates (apply with a different overlay_id
+or refresh the existing rules).

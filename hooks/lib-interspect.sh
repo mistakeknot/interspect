@@ -116,6 +116,9 @@ MIGRATE
         # in SQLite — enforced at insert time in _interspect_insert_evidence.
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'agent';" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_source_kind ON evidence(source_kind, source);" 2>/dev/null || true
+        # Add tool-remediation baseline snapshot (sylveste-sfhq.4)
+        # Stores JSON map of event_type → count at canary creation time. NULL for agent canaries.
+        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE canary ADD COLUMN baseline_pattern_counts TEXT;" 2>/dev/null || true
         # Create sentinels table for TTL caching (og7m.19: system breaker)
         sqlite3 "$_INTERSPECT_DB" "CREATE TABLE IF NOT EXISTS sentinels (key TEXT PRIMARY KEY, value TEXT NOT NULL);" 2>/dev/null || true
         # Ensure overlays directory exists (Type 1 modifications)
@@ -188,7 +191,10 @@ CREATE TABLE IF NOT EXISTS canary (
     baseline_finding_density REAL,
     baseline_window TEXT,
     status TEXT NOT NULL DEFAULT 'active',
-    verdict_reason TEXT
+    verdict_reason TEXT,
+    -- Tool-remediation baseline (sylveste-sfhq.4): JSON map of event_type → count
+    -- at canary creation. NULL for agent canaries.
+    baseline_pattern_counts TEXT
 );
 
 CREATE TABLE IF NOT EXISTS modifications (
@@ -4514,4 +4520,268 @@ _interspect_generate_tool_remediation() {
     content+="*Paste these rules into your CLAUDE.md under a 'Tool Usage' section. Re-run \`/interspect:tune tool:${src}\` to refresh.*"$'\n'
 
     printf '%s' "$content"
+}
+
+# ─── Tool remediation write/disable + canary (sylveste-sfhq.4) ───────────────
+
+# Compute baseline pattern counts for a tool source. Returns a JSON object
+# mapping event_type → count from source_kind='tool' evidence in the past
+# N days. Used as the canary baseline at apply time.
+# Args: $1=source, $2=window_days (default 7)
+# Output: JSON object on stdout (empty {} if no evidence)
+_interspect_compute_tool_baseline() {
+    local src="$1"
+    local window_days="${2:-7}"
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || { echo "{}"; return 0; }
+
+    local escaped
+    escaped=$(_interspect_sql_escape "$src")
+
+    local raw
+    raw=$(sqlite3 -json "$db" "
+        SELECT event, COUNT(*) as count
+        FROM evidence
+        WHERE source = '${escaped}'
+          AND source_kind = 'tool'
+          AND ts > datetime('now', '-${window_days} days')
+        GROUP BY event;
+    " 2>/dev/null) || raw="[]"
+
+    [[ -z "$raw" ]] && raw="[]"
+
+    echo "$raw" | jq -c 'if type == "array" then (map({(.event): .count}) | add // {}) else {} end' 2>/dev/null || echo "{}"
+}
+
+# Count tool-pattern detections since a given timestamp, filtered to one source.
+# Used by /interspect:status to report canary recurrence.
+# Args: $1=source, $2=since_ts (ISO 8601)
+# Output: integer count on stdout
+_interspect_count_tool_pattern_recurrence() {
+    local src="$1"
+    local since_ts="$2"
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || { echo "0"; return 0; }
+
+    local escaped_src escaped_ts
+    escaped_src=$(_interspect_sql_escape "$src")
+    escaped_ts=$(_interspect_sql_escape "$since_ts")
+
+    sqlite3 "$db" "
+        SELECT COUNT(*)
+        FROM evidence
+        WHERE source = '${escaped_src}'
+          AND source_kind = 'tool'
+          AND ts > '${escaped_ts}';
+    " 2>/dev/null || echo "0"
+}
+
+# Write a tool remediation: file + canary entry + modification row.
+# Path: .clavain/interspect/tool-remediations/<source>/<overlay_id>.md
+#
+# Side effects (in order):
+#   1. Snapshot baseline pattern counts (JSON)
+#   2. Write file with active: true frontmatter
+#   3. Git commit
+#   4. Insert canary row with baseline_pattern_counts populated
+#   5. Insert modifications row with mod_type='tool_remediation'
+#
+# Note: tool-remediation files are interspect-internal artifacts under a fixed
+# prefix; we skip _interspect_validate_target (which gates user-code edits) and
+# enforce containment via path prefix check, mirroring the agent-overlay pattern.
+#
+# Args: $1=source, $2=overlay_id, $3=content
+# Returns: 0 on success, 1 on failure
+_interspect_write_tool_remediation() {
+    # Bypass any inherited `git` shell-function override (some Claude Code
+    # subshells inject one via BASH_FUNC_git%%). Function-scoped unset is
+    # local to this call.
+    unset -f git 2>/dev/null || true
+
+    local source="$1"
+    local overlay_id="$2"
+    local content="$3"
+
+    if ! _interspect_validate_tool_source "$source"; then
+        return 1
+    fi
+    if ! _interspect_validate_overlay_id "$overlay_id"; then
+        return 1
+    fi
+
+    # Sanitize content (matches overlay 2000-char limit)
+    if ! content=$(_interspect_sanitize "$content" 2000); then
+        echo "ERROR: Content rejected — contains instruction-like patterns" >&2
+        return 1
+    fi
+    if [[ -z "$content" ]]; then
+        echo "ERROR: Content empty after sanitization" >&2
+        return 1
+    fi
+
+    local root
+    root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    local rel_path=".clavain/interspect/tool-remediations/${source}/${overlay_id}.md"
+    local fullpath="${root}/${rel_path}"
+
+    # Containment: resolved path must stay within tool-remediations dir
+    local tr_root="${root}/.clavain/interspect/tool-remediations/"
+    case "$fullpath" in
+        "${tr_root}"*) ;;
+        *)
+            echo "ERROR: Path escapes tool-remediations directory: ${fullpath}" >&2
+            return 1
+            ;;
+    esac
+
+    # Dedup: refuse to overwrite an existing remediation
+    if [[ -f "$fullpath" ]]; then
+        echo "ERROR: Tool remediation ${overlay_id} already exists for ${source}. Disable existing first via /interspect:revert tool:${source}." >&2
+        return 1
+    fi
+
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    local baseline
+    baseline=$(_interspect_compute_tool_baseline "$source")
+
+    local ts expires_at
+    ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    expires_at=$(date -u -d '+14 days' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -v+14d '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || echo "")
+
+    # Write file with frontmatter
+    if ! mkdir -p "$(dirname "$fullpath")" 2>/dev/null; then
+        echo "ERROR: Could not create tool-remediations directory" >&2
+        return 1
+    fi
+
+    {
+        printf '%s\n' "---"
+        printf 'active: true\n'
+        printf 'created: %s\n' "$ts"
+        printf 'created_by: interspect-tune\n'
+        printf 'source: %s\n' "$source"
+        printf 'source_kind: tool\n'
+        printf 'overlay_id: %s\n' "$overlay_id"
+        printf 'baseline: %s\n' "$baseline"
+        printf '%s\n' "---"
+        printf '%s\n' "$content"
+    } > "$fullpath"
+
+    # Git commit (use git -C to avoid cwd side effects)
+    if ! git -C "$root" add "$rel_path" 2>/dev/null; then
+        rm -f "$fullpath"
+        echo "ERROR: git add failed" >&2
+        return 1
+    fi
+    if ! git -C "$root" commit --no-verify -m "[interspect] Apply tool remediation ${overlay_id} for ${source}" >/dev/null 2>&1; then
+        git -C "$root" reset HEAD -- "$rel_path" 2>/dev/null || true
+        rm -f "$fullpath"
+        echo "ERROR: Git commit failed; remediation rolled back" >&2
+        return 1
+    fi
+
+    local commit_sha
+    commit_sha=$(git -C "$root" rev-parse HEAD 2>/dev/null || echo "")
+
+    # SQL-escape for inserts
+    local e_filepath e_baseline e_source e_oid e_commit
+    e_filepath=$(_interspect_sql_escape "$rel_path")
+    e_baseline=$(_interspect_sql_escape "$baseline")
+    e_source=$(_interspect_sql_escape "$source")
+    e_oid=$(_interspect_sql_escape "$overlay_id")
+    e_commit=$(_interspect_sql_escape "$commit_sha")
+    local group_id="tool/${e_source}/${e_oid}"
+
+    # Insert canary row (baseline_pattern_counts populated; agent baselines NULL)
+    if ! _interspect_sqlite_write "$db" "INSERT INTO canary
+            (file, commit_sha, group_id, applied_at, window_uses, window_expires_at,
+             status, baseline_pattern_counts)
+            VALUES ('${e_filepath}', '${e_commit}', '${group_id}', '${ts}',
+                    ${_INTERSPECT_CANARY_WINDOW_USES:-20}, '${expires_at}',
+                    'active', '${e_baseline}');"; then
+        echo "WARN: Canary insert failed — remediation active but unmonitored" >&2
+    fi
+
+    # Insert modifications row
+    _interspect_sqlite_write "$db" "INSERT INTO modifications
+        (group_id, ts, tier, mod_type, target_file, commit_sha, confidence, evidence_summary, status)
+        VALUES ('${group_id}', '${ts}', 'persistent', 'tool_remediation',
+                '${e_filepath}', '${e_commit}', 0.8,
+                'tool-pattern remediation for ${e_source}', 'applied');" || true
+
+    echo "SUCCESS: Tool remediation ${overlay_id} applied for ${source}. Commit: ${commit_sha}"
+    echo "Canary monitoring active. Run /interspect:status to check recurrence."
+    echo "To undo: /interspect:revert tool:${source}"
+    return 0
+}
+
+# Disable a tool remediation: set active: false in frontmatter, mark canary disabled.
+# Idempotent — re-disabling an already-inactive remediation is a no-op.
+# Args: $1=source, $2=overlay_id
+# Returns: 0 on success (including no-op), 1 on hard failure
+_interspect_disable_tool_remediation() {
+    # Bypass `git` shell-function override (see _interspect_write_tool_remediation note)
+    unset -f git 2>/dev/null || true
+
+    local source="$1"
+    local overlay_id="$2"
+
+    if ! _interspect_validate_tool_source "$source"; then
+        return 1
+    fi
+    if ! _interspect_validate_overlay_id "$overlay_id"; then
+        return 1
+    fi
+
+    local root
+    root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    local rel_path=".clavain/interspect/tool-remediations/${source}/${overlay_id}.md"
+    local fullpath="${root}/${rel_path}"
+
+    if [[ ! -f "$fullpath" ]]; then
+        echo "ERROR: Tool remediation ${overlay_id} not found for ${source}" >&2
+        return 1
+    fi
+
+    if ! _interspect_overlay_is_active "$fullpath"; then
+        echo "INFO: Tool remediation ${overlay_id} for ${source} is already inactive"
+        return 0
+    fi
+
+    # Toggle active: true → active: false in frontmatter (awk state machine
+    # mirrors _interspect_disable_overlay_locked).
+    local tmpfile="${fullpath}.tmp.$$"
+    awk '
+        /^---$/ { delim++ }
+        delim == 1 && /^active: true$/ { $0 = "active: false" }
+        { print }
+    ' "$fullpath" > "$tmpfile"
+    mv "$tmpfile" "$fullpath"
+
+    if ! git -C "$root" add "$rel_path" 2>/dev/null; then
+        git -C "$root" restore "$rel_path" 2>/dev/null || true
+        echo "ERROR: git add failed" >&2
+        return 1
+    fi
+    if ! git -C "$root" commit --no-verify -m "[interspect] Disable tool remediation ${overlay_id} for ${source}" >/dev/null 2>&1; then
+        git -C "$root" reset HEAD -- "$rel_path" 2>/dev/null || true
+        git -C "$root" restore "$rel_path" 2>/dev/null || true
+        echo "ERROR: Git commit failed; remediation not disabled" >&2
+        return 1
+    fi
+
+    # Mark canary as user-disabled
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    local e_source e_oid
+    e_source=$(_interspect_sql_escape "$source")
+    e_oid=$(_interspect_sql_escape "$overlay_id")
+    local group_id="tool/${e_source}/${e_oid}"
+
+    _interspect_sqlite_write "$db" "UPDATE canary SET status = 'disabled', verdict_reason = 'user_disabled'
+        WHERE group_id = '${group_id}' AND status = 'active';" || true
+
+    echo "SUCCESS: Tool remediation ${overlay_id} disabled for ${source}."
+    return 0
 }
