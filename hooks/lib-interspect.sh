@@ -111,6 +111,11 @@ MIGRATE
         sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_source_event_id ON evidence(source_event_id);" 2>/dev/null || true
         # Add quarantine column to evidence (rsj.1.4: evidence quarantine)
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN quarantine_until INTEGER DEFAULT 0;" 2>/dev/null || true
+        # Add source_kind discriminator (sylveste-sfhq.1: telemetry fusion)
+        # Allowed values: agent | tool | pattern. CHECK constraint can't be added by ALTER TABLE
+        # in SQLite — enforced at insert time in _interspect_insert_evidence.
+        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'agent';" 2>/dev/null || true
+        sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_source_kind ON evidence(source_kind, source);" 2>/dev/null || true
         # Create sentinels table for TTL caching (og7m.19: system breaker)
         sqlite3 "$_INTERSPECT_DB" "CREATE TABLE IF NOT EXISTS sentinels (key TEXT PRIMARY KEY, value TEXT NOT NULL);" 2>/dev/null || true
         # Ensure overlays directory exists (Type 1 modifications)
@@ -146,7 +151,8 @@ CREATE TABLE IF NOT EXISTS evidence (
     context TEXT NOT NULL,
     project TEXT NOT NULL,
     project_lang TEXT,
-    project_type TEXT
+    project_type TEXT,
+    source_kind TEXT NOT NULL DEFAULT 'agent' CHECK (source_kind IN ('agent','tool','pattern'))
 );
 
 -- Lineage columns (added iv-w3ee6): trace evidence back to kernel events
@@ -201,6 +207,7 @@ CREATE TABLE IF NOT EXISTS modifications (
 CREATE INDEX IF NOT EXISTS idx_evidence_session ON evidence(session_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_session_source ON evidence(session_id, source);
 CREATE INDEX IF NOT EXISTS idx_evidence_source ON evidence(source);
+CREATE INDEX IF NOT EXISTS idx_evidence_source_kind ON evidence(source_kind, source);
 CREATE INDEX IF NOT EXISTS idx_evidence_project ON evidence(project);
 CREATE INDEX IF NOT EXISTS idx_evidence_event ON evidence(event);
 CREATE INDEX IF NOT EXISTS idx_evidence_ts ON evidence(ts);
@@ -637,7 +644,7 @@ _interspect_is_routing_eligible() {
     # Include both manual overrides and disagreement-pipeline overrides
     # Quarantine filter: exclude evidence still within quarantine period (rsj.1.4)
     local total wrong pct
-    local _qf="AND COALESCE(quarantine_until, 0) <= CAST(strftime('%s', 'now') AS INTEGER)"
+    local _qf="AND COALESCE(quarantine_until, 0) <= CAST(strftime('%s', 'now') AS INTEGER) AND source_kind = 'agent'"
     total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') ${_qf};")
     wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated') ${_qf};")
 
@@ -696,7 +703,7 @@ _interspect_get_routing_eligible() {
         local escaped
         escaped=$(_interspect_sql_escape "$src")
         local total wrong pct
-        local _qf="AND COALESCE(quarantine_until, 0) <= CAST(strftime('%s', 'now') AS INTEGER)"
+        local _qf="AND COALESCE(quarantine_until, 0) <= CAST(strftime('%s', 'now') AS INTEGER) AND source_kind = 'agent'"
         total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') ${_qf};")
         wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated') ${_qf};")
         pct=$(( total > 0 ? wrong * 100 / total : 0 ))
@@ -1030,8 +1037,8 @@ _interspect_apply_override_locked() {
     escaped_agent=$(_interspect_sql_escape "$agent")
     _interspect_load_confidence
     local total wrong confidence
-    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${escaped_agent}' AND event IN ('override', 'disagreement_override');")
-    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${escaped_agent}' AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
+    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${escaped_agent}' AND source_kind = 'agent' AND event IN ('override', 'disagreement_override');")
+    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${escaped_agent}' AND source_kind = 'agent' AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
     if (( total > 0 )); then
         confidence=$(awk -v w="$wrong" -v t="$total" 'BEGIN {printf "%.2f", w/t}')
     else
@@ -1415,8 +1422,8 @@ _interspect_approve_override_locked() {
     escaped_review_prefixed=$(_interspect_sql_escape "interflux:review:${agent}")
     _interspect_load_confidence
     local total wrong confidence
-    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source IN ('${escaped_agent}', '${escaped_prefixed}', '${escaped_review_prefixed}') AND event IN ('override', 'disagreement_override');")
-    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source IN ('${escaped_agent}', '${escaped_prefixed}', '${escaped_review_prefixed}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
+    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source IN ('${escaped_agent}', '${escaped_prefixed}', '${escaped_review_prefixed}') AND source_kind = 'agent' AND event IN ('override', 'disagreement_override');")
+    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source IN ('${escaped_agent}', '${escaped_prefixed}', '${escaped_review_prefixed}') AND source_kind = 'agent' AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
     if (( total > 0 )); then
         confidence=$(awk -v w="$wrong" -v t="$total" 'BEGIN {printf "%.2f", w/t}')
     else
@@ -1859,7 +1866,7 @@ _interspect_should_auto_apply() {
     escaped_agent=$(_interspect_sql_escape "$agent")
 
     local session_count
-    session_count=$(sqlite3 "$db" "SELECT COUNT(DISTINCT session_id) FROM evidence WHERE source = '${escaped_agent}';" 2>/dev/null || echo "0")
+    session_count=$(sqlite3 "$db" "SELECT COUNT(DISTINCT session_id) FROM evidence WHERE source = '${escaped_agent}' AND source_kind = 'agent';" 2>/dev/null || echo "0")
 
     if (( session_count < min_baseline )); then
         echo "INFO: Insufficient baseline for ${agent} (${session_count}/${min_baseline} sessions) — forcing propose mode." >&2
@@ -2740,7 +2747,7 @@ _interspect_sanitize() {
 _interspect_validate_hook_id() {
     local hook_id="$1"
     case "$hook_id" in
-        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-execution-defect|interspect-verdict|interspect-delegation|interspect-decomposition|interspect-reaction|sprint-review-calibration)
+        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-execution-defect|interspect-verdict|interspect-delegation|interspect-decomposition|interspect-reaction|sprint-review-calibration|tool-time-pattern)
             return 0
             ;;
         *)
@@ -2754,6 +2761,7 @@ _interspect_validate_hook_id() {
 # Insert an evidence row with sanitization.
 # Args: $1=session_id $2=source $3=event $4=override_reason $5=context_json $6=hook_id
 #       $7=source_event_id (optional) $8=source_table (optional) $9=raw_override_reason (optional)
+#       $10=source_kind (optional, default 'agent'; one of: agent | tool | pattern)
 _interspect_insert_evidence() {
     local session_id="$1"
     local source="$2"
@@ -2765,11 +2773,18 @@ _interspect_insert_evidence() {
     local source_event_id="${7:-}"
     local source_table="${8:-}"
     local raw_override_reason="${9:-}"
+    local source_kind="${10:-agent}"
 
     # Validate hook_id
     if [[ -n "$hook_id" ]] && ! _interspect_validate_hook_id "$hook_id"; then
         return 1
     fi
+
+    # Validate source_kind (sylveste-sfhq.1: telemetry fusion)
+    case "$source_kind" in
+        agent|tool|pattern) ;;
+        *) return 1 ;;
+    esac
 
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || return 1
@@ -2812,8 +2827,9 @@ _interspect_insert_evidence() {
     local e_source_event_id="${source_event_id//\'/\'\'}"
     local e_source_table="${source_table//\'/\'\'}"
     local e_raw_override_reason="${raw_override_reason//\'/\'\'}"
+    local e_source_kind="${source_kind//\'/\'\'}"
 
-    _interspect_sqlite_write "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason, quarantine_until) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''), ${quarantine_until});"
+    _interspect_sqlite_write "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason, quarantine_until, source_kind) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''), ${quarantine_until}, '${e_source_kind}');"
 }
 
 # ─── Session Source Classification (Calibration v2) ──────────────────────────
@@ -3397,6 +3413,7 @@ rows = conn.execute(
     FROM evidence e
     LEFT JOIN sessions s ON e.session_id = s.session_id
     WHERE e.event IN ('agent_dispatch', 'verdict_outcome', 'override', 'disagreement_override')
+      AND e.source_kind = 'agent'
     ORDER BY agent, e.ts
     """
 ).fetchall()
