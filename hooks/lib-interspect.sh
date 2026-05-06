@@ -245,8 +245,10 @@ CREATE TABLE IF NOT EXISTS sentinels (
 );
 SQL
     # Migration: add cohort columns to canary table (iv-f7gsz)
-    sqlite3 "$db" "ALTER TABLE canary ADD COLUMN project TEXT DEFAULT '';" 2>/dev/null || true
-    sqlite3 "$db" "ALTER TABLE canary ADD COLUMN cohort_key TEXT DEFAULT '';" 2>/dev/null || true
+    # Uses $_INTERSPECT_DB (the function-scoped DB var); $db is local to *other* functions
+    # and unset here. Bug fix: sylveste-3hyi.
+    sqlite3 "$_INTERSPECT_DB" "ALTER TABLE canary ADD COLUMN project TEXT DEFAULT '';" 2>/dev/null || true
+    sqlite3 "$_INTERSPECT_DB" "ALTER TABLE canary ADD COLUMN cohort_key TEXT DEFAULT '';" 2>/dev/null || true
 
     # Ensure durable cursor for kernel event consumer (E4.2/E4.5)
     # Only register if cursor doesn't exist yet (register resets position to 0)
