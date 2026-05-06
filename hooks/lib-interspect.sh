@@ -4317,11 +4317,28 @@ _interspect_cross_project_report() {
 
 # ─── Overlay generation ─────────────────────────────────────────────────────
 
-# _interspect_generate_overlay <agent>
-# Generates overlay content from the agent's correction evidence.
-# Returns the overlay markdown body (without frontmatter) on stdout.
+# _interspect_generate_overlay <target> [<kind>]
+# Dual-mode generation (sylveste-sfhq.3):
+#   kind=agent (default) — emit prompt overlay from override evidence (existing behavior)
+#   kind=tool             — emit CLAUDE.md remediation from tool-pattern evidence
+# Returns the markdown body (without frontmatter) on stdout.
 _interspect_generate_overlay() {
-    local agent="$1"
+    local target="$1"
+    local kind="${2:-agent}"
+
+    case "$kind" in
+        agent) ;;
+        tool)
+            _interspect_generate_tool_remediation "$target"
+            return $?
+            ;;
+        *)
+            echo "ERROR: Invalid kind '$kind'. Must be 'agent' or 'tool'." >&2
+            return 1
+            ;;
+    esac
+
+    local agent="$target"
     local db
     db=$(_interspect_db_path) || return 1
 
@@ -4389,6 +4406,110 @@ _interspect_generate_overlay() {
     content+="- Focus on patterns relevant to ${project_type:-this project} ecosystem"$'\n'
     content+="- Avoid generic recommendations that don't apply to this codebase"$'\n'
     content+="- Prioritize findings that are actionable within the project's architecture"$'\n'
+
+    printf '%s' "$content"
+}
+
+# ─── Tool-pattern remediation (sylveste-sfhq.3) ──────────────────────────────
+
+# Validate a tool source name. Looser than agent name — tools have mixed case
+# (Bash, Edit, Read) and the "tool-time" sentinel uses a hyphen.
+# Args: $1=source_name
+# Returns: 0 if valid, 1 if not
+_interspect_validate_tool_source() {
+    local src="$1"
+    if [[ ! "$src" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]]; then
+        echo "ERROR: Invalid tool source '${src}'. Must match [A-Za-z][A-Za-z0-9_-]*." >&2
+        return 1
+    fi
+    return 0
+}
+
+# Generate CLAUDE.md remediation suggestions for a tool source from
+# source_kind='tool' evidence accumulated by the tool-time bridge (sfhq.2).
+# Args: $1=tool_source (e.g., 'Bash', 'Edit', 'tool-time')
+# Output: remediation markdown body on stdout (no frontmatter)
+# Returns: 0 on success, 1 if no evidence found or invalid source
+_interspect_generate_tool_remediation() {
+    local src="$1"
+
+    if ! _interspect_validate_tool_source "$src"; then
+        return 1
+    fi
+
+    local db
+    db=$(_interspect_db_path) || return 1
+
+    local escaped
+    escaped=$(_interspect_sql_escape "$src")
+
+    # Aggregate pattern types for this tool source.
+    # Quarantine filter mirrors the policy used elsewhere: only past-quarantine
+    # rows count toward remediation suggestions.
+    local patterns
+    patterns=$(sqlite3 -separator '|' "$db" "
+        SELECT event, COUNT(*) as cnt
+        FROM evidence
+        WHERE source = '${escaped}'
+          AND source_kind = 'tool'
+          AND COALESCE(quarantine_until, 0) <= CAST(strftime('%s', 'now') AS INTEGER)
+        GROUP BY event
+        ORDER BY cnt DESC;
+    " 2>/dev/null) || patterns=""
+
+    if [[ -z "$patterns" ]]; then
+        echo "No tool-pattern evidence found for ${src}."
+        return 1
+    fi
+
+    local total
+    total=$(sqlite3 "$db" "
+        SELECT COUNT(*)
+        FROM evidence
+        WHERE source = '${escaped}' AND source_kind = 'tool'
+          AND COALESCE(quarantine_until, 0) <= CAST(strftime('%s', 'now') AS INTEGER);
+    " 2>/dev/null) || total="0"
+
+    local project
+    project=$(_interspect_project_name)
+
+    # Build remediation suggestions per pattern type.
+    # Each branch produces a prescriptive rule the user can paste into CLAUDE.md.
+    local content=""
+    content+="## Tool Discipline — ${src}"$'\n'
+    content+=""$'\n'
+    content+="Project: ${project}"$'\n'
+    content+="Based on ${total} pattern detection(s)."$'\n'
+    content+=""$'\n'
+    content+="### Suggested CLAUDE.md additions"$'\n'
+    content+=""$'\n'
+
+    while IFS='|' read -r event count; do
+        [[ -z "$event" ]] && continue
+        case "$event" in
+            tool_error_rate_high)
+                content+="- **${src} error rate** is high (${count} flagged session(s)). Verify args, paths, or environment before invoking; prefer dedicated tools (Read/Edit/Glob) over shell when possible."$'\n'
+                ;;
+            tool_rejection_rate_high)
+                content+="- **${src} rejection rate** is high (${count} flagged session(s)). User frequently denies these calls — review whether they fit project norms before each invocation."$'\n'
+                ;;
+            tool_edit_without_read)
+                content+="- **Read before Edit**: ${count} session(s) show edits to unread files. Always Read first to verify content and avoid blind overwrites."$'\n'
+                ;;
+            tool_bash_dominance)
+                content+="- **Bash overuse** (${count} session(s)): prefer Glob/Grep/Read for file discovery and inspection. Reserve Bash for git, build, deploy, and shell-only operations."$'\n'
+                ;;
+            tool_low_diversity)
+                content+="- **Low tool diversity** (${count} session(s)): expand tool usage. Underused tools often solve problems faster than the few being relied upon."$'\n'
+                ;;
+            *)
+                content+="- **${event}** (${count} occurrence(s)): review tool usage for ${src}."$'\n'
+                ;;
+        esac
+    done <<< "$patterns"
+
+    content+=""$'\n'
+    content+="*Paste these rules into your CLAUDE.md under a 'Tool Usage' section. Re-run \`/interspect:tune tool:${src}\` to refresh.*"$'\n'
 
     printf '%s' "$content"
 }
