@@ -3526,6 +3526,18 @@ _interspect_write_routing_calibration() {
         return 1
     fi
     mv "$tmpfile" "$calibration_path"
+
+    # Archive historical snapshot for /interspect:calibrate-audit (Sylveste-xr3).
+    # Best-effort: failure here must NOT break the calibration write.
+    local history_dir="${calibration_dir}/calibration-history"
+    if mkdir -p "$history_dir" 2>/dev/null; then
+        local snapshot_ts
+        snapshot_ts=$(date -u +%Y-%m-%dT%H-%M-%SZ)
+        local snapshot_path="${history_dir}/${snapshot_ts}.json"
+        cp "$calibration_path" "$snapshot_path" 2>/dev/null || true
+        # Prune snapshots older than 1 year to bound disk usage.
+        find "$history_dir" -maxdepth 1 -name "*.json" -type f -mtime +365 -delete 2>/dev/null || true
+    fi
 }
 
 # Auto-calibrate confidence thresholds from canary outcomes.
