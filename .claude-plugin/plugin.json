@@ -13,5 +13,10 @@
     "canary-monitoring",
     "performance",
     "optimization"
+  ],
+  "peerDependencies": [
+    "interflux",
+    "interstat",
+    "tool-time"
   ]
 }
