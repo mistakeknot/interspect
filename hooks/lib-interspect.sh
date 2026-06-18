@@ -112,10 +112,37 @@ MIGRATE
         # Add quarantine column to evidence (rsj.1.4: evidence quarantine)
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN quarantine_until INTEGER DEFAULT 0;" 2>/dev/null || true
         # Add source_kind discriminator (sylveste-sfhq.1: telemetry fusion)
-        # Allowed values: agent | tool | pattern. CHECK constraint can't be added by ALTER TABLE
-        # in SQLite — enforced at insert time in _interspect_insert_evidence.
+        # Allowed values: agent | tool | pattern | skill (skill added sylveste-7aj8.1).
+        # CHECK constraint can't be added by ALTER TABLE in SQLite — enforced at insert
+        # time in _interspect_insert_evidence.
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'agent';" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_source_kind ON evidence(source_kind, source);" 2>/dev/null || true
+        # Skill-calibration schema (sylveste-7aj8.1): goals + signals + audit cursor
+        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE sessions ADD COLUMN last_skill_audit_ts TEXT;" 2>/dev/null || true
+        sqlite3 "$_INTERSPECT_DB" <<'SKILLMIGRATE' 2>/dev/null || true
+CREATE TABLE IF NOT EXISTS skill_goals (
+    skill_name TEXT PRIMARY KEY,
+    goal_weights TEXT NOT NULL,
+    classified_from TEXT NOT NULL,
+    classifier_version TEXT NOT NULL,
+    classified_at TEXT NOT NULL,
+    skill_md_hash TEXT
+);
+CREATE TABLE IF NOT EXISTS skill_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_name TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
+    signal_kind TEXT NOT NULL,
+    value REAL NOT NULL,
+    raw_value REAL,
+    observed_at TEXT NOT NULL,
+    metadata TEXT,
+    UNIQUE(invocation_id, signal_kind)
+);
+CREATE INDEX IF NOT EXISTS idx_skill_signals_name ON skill_signals(skill_name, signal_kind);
+CREATE INDEX IF NOT EXISTS idx_skill_signals_session ON skill_signals(session_id);
+SKILLMIGRATE
         # Add tool-remediation baseline snapshot (sylveste-sfhq.4)
         # Stores JSON map of event_type → count at canary creation time. NULL for agent canaries.
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE canary ADD COLUMN baseline_pattern_counts TEXT;" 2>/dev/null || true
@@ -155,7 +182,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     project TEXT NOT NULL,
     project_lang TEXT,
     project_type TEXT,
-    source_kind TEXT NOT NULL DEFAULT 'agent' CHECK (source_kind IN ('agent','tool','pattern'))
+    source_kind TEXT NOT NULL DEFAULT 'agent' CHECK (source_kind IN ('agent','tool','pattern','skill'))
 );
 
 -- Lineage columns (added iv-w3ee6): trace evidence back to kernel events
@@ -174,7 +201,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     end_ts TEXT,
     project TEXT,
     run_id TEXT,
-    source TEXT DEFAULT 'normal'
+    source TEXT DEFAULT 'normal',
+    last_skill_audit_ts TEXT
 );
 
 CREATE TABLE IF NOT EXISTS canary (
@@ -244,6 +272,29 @@ CREATE TABLE IF NOT EXISTS canary_samples (
     UNIQUE(canary_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS idx_canary_samples_canary ON canary_samples(canary_id);
+
+CREATE TABLE IF NOT EXISTS skill_goals (
+    skill_name TEXT PRIMARY KEY,
+    goal_weights TEXT NOT NULL,
+    classified_from TEXT NOT NULL,
+    classifier_version TEXT NOT NULL,
+    classified_at TEXT NOT NULL,
+    skill_md_hash TEXT
+);
+CREATE TABLE IF NOT EXISTS skill_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_name TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
+    signal_kind TEXT NOT NULL,
+    value REAL NOT NULL,
+    raw_value REAL,
+    observed_at TEXT NOT NULL,
+    metadata TEXT,
+    UNIQUE(invocation_id, signal_kind)
+);
+CREATE INDEX IF NOT EXISTS idx_skill_signals_name ON skill_signals(skill_name, signal_kind);
+CREATE INDEX IF NOT EXISTS idx_skill_signals_session ON skill_signals(session_id);
 
 CREATE TABLE IF NOT EXISTS sentinels (
     key TEXT PRIMARY KEY,
