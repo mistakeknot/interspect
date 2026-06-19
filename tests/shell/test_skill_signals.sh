@@ -170,7 +170,10 @@ echo ""
 echo "=== collect_tokens (cass unavailable) ==="
 seed_evidence "inv-tok-1" "sess-tok" "clavain:work" "2026-06-01T10:00:00Z"
 # Force cass off PATH so the collector hits the graceful-degrade branch.
-OUT=$(PATH="/nonexistent" /usr/bin/env python3 "$SIGNALS/collect_tokens.py" --db "$DB" 2>&1 || true)
+# Resolve python3 to an absolute path FIRST, then clear PATH so only `cass`
+# (looked up via shutil.which) is missing — python itself still runs.
+PY3=$(command -v python3)
+OUT=$(PATH="" "$PY3" "$SIGNALS/collect_tokens.py" --db "$DB" 2>&1 || true)
 TOK_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM skill_signals WHERE invocation_id='inv-tok-1' AND signal_kind='tokens';")
 assert_eq "cass unavailable → no tokens signal written" "$TOK_COUNT" "0"
 assert_eq "cass unavailable logged" \
