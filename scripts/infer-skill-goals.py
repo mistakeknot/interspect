@@ -782,12 +782,27 @@ def classify_pass(
 
 
 def resolve_skills(
-    roots: list[Path], only: str | None
+    skills_roots: list[Path],
+    commands_roots: list[Path],
+    only: str | None,
 ) -> list[SkillEntry]:
-    skills = enumerate_skills(roots)
+    """Enumerate skills + commands into one entity list.
+
+    Skills are enumerated first; commands second. Dedup by canonical name across
+    BOTH — first writer wins, so a name colliding between a skill and a command
+    resolves to the skill (documented tie-break). Returns a single list the
+    classify/refine passes treat uniformly.
+    """
+    entities = enumerate_skills(skills_roots)
+    seen = {e.name for e in entities}
+    for cmd in enumerate_commands(commands_roots):
+        if cmd.name in seen:
+            continue
+        seen.add(cmd.name)
+        entities.append(cmd)
     if only:
-        skills = [s for s in skills if s.name == only]
-    return skills
+        entities = [e for e in entities if e.name == only]
+    return entities
 
 
 def main() -> int:
