@@ -122,6 +122,12 @@ RUN_REFINE_BY_DEFAULT = True
 
 GOAL_KEYS = ("speed", "precision", "completeness")
 
+# classified_from values that double as the entity_kind discriminator (no schema
+# migration — these live in the existing classified_from column). The refine pass
+# overwrites either with 'observed'.
+CLASSIFIED_FROM_SKILL = "skill_md"
+CLASSIFIED_FROM_COMMAND = "command_md"
+
 
 # ─── Repo-root / DB discovery (mirrors ingest-skill-audit.py) ────────────────
 
