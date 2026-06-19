@@ -60,7 +60,7 @@ Modes:
   --dry-run   Print would-be weights; never writes.
   --force     Re-classify even when skill_md_hash is unchanged.
   --refine    Force the observed-refinement pass (it also runs by default).
-  --skill N   Classify just one skill by canonical name (on-demand).
+  --skill N   Classify just one skill OR command by canonical name (on-demand).
 
 Usage:
   infer-skill-goals.py [--db PATH] [--skills-root PATH ...]
