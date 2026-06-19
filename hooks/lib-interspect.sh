@@ -2820,7 +2820,7 @@ _interspect_validate_hook_id() {
 # Insert an evidence row with sanitization.
 # Args: $1=session_id $2=source $3=event $4=override_reason $5=context_json $6=hook_id
 #       $7=source_event_id (optional) $8=source_table (optional) $9=raw_override_reason (optional)
-#       $10=source_kind (optional, default 'agent'; one of: agent | tool | pattern)
+#       $10=source_kind (optional, default 'agent'; one of: agent | tool | pattern | skill)
 _interspect_insert_evidence() {
     local session_id="$1"
     local source="$2"
