@@ -248,6 +248,82 @@ def _looks_like_cache_root(root: Path) -> bool:
     return False
 
 
+def _plugin_namespaced_command_name(cmd_md: Path, cache_root: Path) -> str | None:
+    """Derive `<plugin>:<cmd-stem>` from a cache-layout command .md path.
+
+    Layout: <cache_root>/<marketplace>/<plugin>/<version>/commands/<cmd>.md
+    The plugin segment is the dir two levels under the marketplace; the command
+    segment is the .md filename stem. This matches how commands appear as Skill
+    events (e.g. 'clavain:sprint').
+    """
+    try:
+        rel = cmd_md.relative_to(cache_root)
+    except ValueError:
+        return None
+    parts = rel.parts
+    # marketplace / plugin / version / commands / <cmd>.md  → 5 parts
+    if len(parts) < 5 or parts[-2] != "commands" or not parts[-1].endswith(".md"):
+        return None
+    plugin = parts[1]
+    cmd = cmd_md.stem
+    if not plugin or not cmd:
+        return None
+    return f"{plugin}:{cmd}"
+
+
+def _is_cache_command_root(root: Path) -> bool:
+    """Heuristic mirror of _looks_like_cache_root for the command layout: a deep
+    `.../commands/<cmd>.md` (>= 5 segments, `commands` parent dir) decides."""
+    if root.name == "cache":
+        return True
+    for cmd_md in root.rglob("*.md"):
+        try:
+            depth = len(cmd_md.relative_to(root).parts)
+        except ValueError:
+            continue
+        if depth >= 5 and cmd_md.parent.name == "commands":
+            return True
+        return False  # first hit decides
+    return False
+
+
+def enumerate_commands(roots: list[Path]) -> list[SkillEntry]:
+    """Find command .md files under each root and assign canonical names.
+
+    Commands are SINGLE `.md` files directly in a `commands/` dir (NOT a dir with
+    a SKILL.md inside). Two layouts:
+    - Cache root: `<marketplace>/<plugin>/<version>/commands/<cmd>.md` → `<plugin>:<cmd>`.
+    - Flat root (`~/.claude/commands`, `<repo>/.claude/commands`): `<cmd>.md` → bare `<cmd>`.
+
+    Only files whose parent dir is named `commands` are taken (so sibling
+    non-command files like `degraded-modes.yaml` — already excluded by the *.md
+    glob — and nested `commands/<sub>/x.md` are filtered). Dedup by canonical
+    name within commands; first root wins.
+    """
+    seen: dict[str, SkillEntry] = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        is_cache_layout = _is_cache_command_root(root)
+        for cmd_md in sorted(root.rglob("*.md")):
+            # Only direct children of a `commands/` dir are commands.
+            if cmd_md.parent.name != "commands":
+                continue
+            if is_cache_layout:
+                name = _plugin_namespaced_command_name(cmd_md, root)
+                if name is None:
+                    # Not the expected depth — fall back to the bare stem.
+                    name = cmd_md.stem
+            else:
+                # Flat layout: <root>/commands/<cmd>.md — but a flat root IS the
+                # commands dir, so its direct children are bare-named commands.
+                name = cmd_md.stem
+            if not name or name in seen:
+                continue
+            seen[name] = SkillEntry(name=name, path=cmd_md, kind="command")
+    return list(seen.values())
+
+
 # ─── SKILL.md parsing + hashing ──────────────────────────────────────────────
 
 
