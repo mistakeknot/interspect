@@ -851,26 +851,44 @@ def main() -> int:
         return 1
 
     if args.skills_root:
-        roots = [Path(os.path.expanduser(r)) for r in args.skills_root]
+        skills_roots = [Path(os.path.expanduser(r)) for r in args.skills_root]
     else:
-        roots = default_skills_roots()
+        skills_roots = default_skills_roots()
         # Include the project .claude/skills if present.
         proj = repo_root / ".claude" / "skills"
         if proj.is_dir():
-            roots.append(proj)
+            skills_roots.append(proj)
 
-    skills = resolve_skills(roots, args.skill)
+    if args.commands_root:
+        commands_roots = [Path(os.path.expanduser(r)) for r in args.commands_root]
+    elif args.skills_root:
+        # Override mode: scan the same fixture roots for commands too, so a single
+        # test root holding both `.../skills/...` and `.../commands/...` works.
+        commands_roots = list(skills_roots)
+    else:
+        commands_roots = default_commands_roots()
+        # Include the project .claude/commands if present.
+        proj_cmds = repo_root / ".claude" / "commands"
+        if proj_cmds.is_dir():
+            commands_roots.append(proj_cmds)
+
+    skills = resolve_skills(skills_roots, commands_roots, args.skill)
     if args.skill and not skills:
         print(
-            f"infer-skill-goals: skill '{args.skill}' not found under "
-            f"{[str(r) for r in roots]}",
+            f"infer-skill-goals: '{args.skill}' not found under skills_roots="
+            f"{[str(r) for r in skills_roots]} commands_roots="
+            f"{[str(r) for r in commands_roots]}",
             file=sys.stderr,
         )
         return 1
 
+    n_commands = sum(1 for s in skills if s.kind == "command")
+    n_skills = len(skills) - n_commands
     print(
-        f"infer-skill-goals: roots={[str(r) for r in roots]} "
-        f"found={len(skills)} mock={args.mock} dry_run={args.dry_run} force={args.force}",
+        f"infer-skill-goals: skills_roots={[str(r) for r in skills_roots]} "
+        f"commands_roots={[str(r) for r in commands_roots]} "
+        f"found={len(skills)} (skills={n_skills} commands={n_commands}) "
+        f"mock={args.mock} dry_run={args.dry_run} force={args.force}",
         file=sys.stderr,
     )
 
