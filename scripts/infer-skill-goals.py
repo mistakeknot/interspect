@@ -762,11 +762,14 @@ def classify_pass(
             stats["classified"] += 1
             continue
 
+        classified_from = (
+            CLASSIFIED_FROM_COMMAND if skill.kind == "command" else CLASSIFIED_FROM_SKILL
+        )
         upsert_goals(
             conn,
             skill_name=skill.name,
             weights=weights,
-            classified_from="skill_md",
+            classified_from=classified_from,
             classifier_version=CLASSIFIER_VERSION,
             classified_at=now_iso,
             skill_md_hash_val=h,
