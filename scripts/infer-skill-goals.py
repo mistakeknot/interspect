@@ -30,6 +30,31 @@ Plugin SKILL.md files live under the cache layout
 user skills live at `~/.claude/skills/<skill>/SKILL.md` (namespace = bare name);
 project skills at `<repo>/.claude/skills/<skill>/SKILL.md`.
 
+COMMAND enumeration (sylveste-7aj8.8) covers the highest-traffic surfaces. Commands
+fire as `tool:"Skill"` events too (that's why `clavain:sprint`, `interflux:flux-drive`
+appear in the scoring leaderboard), but they are SINGLE `.md` files directly in a
+`commands/` dir — not a dir containing SKILL.md. They are enumerated identically and
+land in the SAME `skill_goals` table keyed by the namespaced name:
+  - Plugin commands: `<cache>/<marketplace>/<plugin>/<version>/commands/<cmd>.md`
+    → name `<plugin>:<cmd>` (e.g. `.../clavain/0.6.252/commands/sprint.md` → `clavain:sprint`).
+  - User commands: `~/.claude/commands/<cmd>.md` → bare name `<cmd>`.
+  - Project commands: `<repo>/.claude/commands/<cmd>.md` → bare name `<cmd>`.
+Classification is identical to skills (same Haiku prompt over frontmatter + body slice).
+
+entity_kind discriminator: the `skill_goals` table has no dedicated column and this
+task does NOT migrate schema, so we record the entity kind in the existing
+`classified_from` column — `skill_md` for skills, `command_md` for commands (the
+refine pass still rewrites it to `observed`). This is queryable
+(`WHERE classified_from='command_md'`) without a schema change, and scoring treats
+`classified_from` as an opaque audit string (it only switches goal_source to
+'skill_goals' when any row exists), so the new value is safe.
+
+De-dup / tie-break: enumeration walks skills first, then commands, and dedups by
+canonical name (first writer wins). If the same `<plugin>:<name>` exists as BOTH a
+skill and a command (not observed in practice), the skill wins — skills are the
+richer SKILL.md surface and were the original classified entity; the command would
+only be a thin orchestration shim under the same name.
+
 Modes:
   --mock      Deterministic stub classifier (no API call) — for tests/CI.
   --dry-run   Print would-be weights; never writes.
