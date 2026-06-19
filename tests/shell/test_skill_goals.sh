@@ -198,6 +198,134 @@ assert_eq "--skill found exactly 1" \
     "$(echo "$OUT" | grep -o 'found=[0-9]*' | tail -1)" "found=1"
 
 echo ""
+echo "=== COMMAND discovery + classification (sylveste-7aj8.8) ==="
+# Commands are SINGLE .md files in a commands/ dir (NOT a dir with SKILL.md).
+# Cache layout: <mkt>/<plugin>/<ver>/commands/<cmd>.md → <plugin>:<cmd>.
+# Flat layout:  <root>/commands/<cmd>.md (user/project) → bare <cmd>.
+CMD_DIR="$TEST_DIR/cmd_proj"
+mkdir -p "$CMD_DIR/.clavain/interspect"
+export CLAUDE_PROJECT_DIR="$CMD_DIR"
+unset _INTERSPECT_DB
+_interspect_ensure_db >/dev/null
+CDB=$(_interspect_db_path)
+
+CMD_ROOT="$TEST_DIR/cmds_cache"
+mk_command() {
+    # mk_command <plugin> <cmd> <desc>
+    local plugin="$1" cmd="$2" desc="$3"
+    local dir="$CMD_ROOT/testmkt/$plugin/0.1.0/commands"
+    mkdir -p "$dir"
+    cat > "$dir/$cmd.md" <<EOF
+---
+name: $cmd
+description: $desc
+argument-hint: "[args]"
+---
+
+# $cmd
+
+$desc
+EOF
+}
+
+# A sibling non-command file in the commands dir must be ignored (only *.md taken,
+# and only files whose parent dir is 'commands').
+mk_command clavain sprint "Phase sequencer that orchestrates the lifecycle pipeline: brainstorm, plan, execute, ship."
+mk_command interflux flux-drive "Dispatch a parallel multi-agent workflow that sequences triage and synthesis phases."
+echo "irrelevant: not a command" > "$CMD_ROOT/testmkt/clavain/0.1.0/commands/degraded-modes.yaml"
+
+# Flat user-style command root.
+FLAT_CMD_ROOT="$TEST_DIR/flat_cmds/commands"
+mkdir -p "$FLAT_CMD_ROOT"
+cat > "$FLAT_CMD_ROOT/mycmd.md" <<'EOF'
+---
+name: mycmd
+description: A bare user command that searches and finds things by query.
+---
+# mycmd
+search and find by query
+EOF
+
+python3 "$INFER" --commands-root "$CMD_ROOT" --commands-root "$TEST_DIR/flat_cmds" \
+    --skills-root "$TEST_DIR/empty_skills" --db "$CDB" --mock --no-refine 2>/dev/null
+
+# 3 commands discovered + persisted (2 namespaced + 1 bare); no skills (empty root).
+CMD_COUNT=$(sqlite3 "$CDB" "SELECT COUNT(*) FROM skill_goals;")
+assert_eq "3 command goal rows written" "$CMD_COUNT" "3"
+
+# Namespacing: <plugin>:<cmd-stem> from the cache layout.
+SPRINT_EXISTS=$(sqlite3 "$CDB" "SELECT COUNT(*) FROM skill_goals WHERE skill_name='clavain:sprint';")
+assert_eq "clavain:sprint discovered + named correctly" "$SPRINT_EXISTS" "1"
+FD_EXISTS=$(sqlite3 "$CDB" "SELECT COUNT(*) FROM skill_goals WHERE skill_name='interflux:flux-drive';")
+assert_eq "interflux:flux-drive discovered + named correctly" "$FD_EXISTS" "1"
+
+# Flat command → bare name.
+BARE_EXISTS=$(sqlite3 "$CDB" "SELECT COUNT(*) FROM skill_goals WHERE skill_name='mycmd';")
+assert_eq "flat user command named bare 'mycmd'" "$BARE_EXISTS" "1"
+
+# entity_kind discriminator: commands recorded with classified_from='command_md'.
+SPRINT_FROM=$(sqlite3 "$CDB" "SELECT classified_from FROM skill_goals WHERE skill_name='clavain:sprint';")
+assert_eq "command classified_from is command_md" "$SPRINT_FROM" "command_md"
+
+# Command weights persisted + sum to 1.0.
+CMD_BAD_SUMS=$(sqlite3 "$CDB" "
+SELECT COUNT(*) FROM skill_goals
+WHERE ROUND(
+  json_extract(goal_weights,'\$.speed') +
+  json_extract(goal_weights,'\$.precision') +
+  json_extract(goal_weights,'\$.completeness'), 4) != 1.0;")
+assert_eq "all command weight vectors sum to 1.0" "$CMD_BAD_SUMS" "0"
+
+# The sibling .yaml must NOT have produced a row.
+YAML_ROW=$(sqlite3 "$CDB" "SELECT COUNT(*) FROM skill_goals WHERE skill_name LIKE '%degraded%';")
+assert_eq "non-.md sibling ignored (no degraded-modes row)" "$YAML_ROW" "0"
+
+echo ""
+echo "=== --skill works for a COMMAND name ==="
+OUT=$(python3 "$INFER" --commands-root "$CMD_ROOT" --skills-root "$TEST_DIR/empty_skills" \
+    --db "$CDB" --mock --force --no-refine --skill clavain:sprint 2>&1)
+assert_eq "--skill clavain:sprint classifies exactly 1" \
+    "$(echo "$OUT" | grep -o 'classified=[0-9]*' | tail -1)" "classified=1"
+assert_eq "--skill clavain:sprint found exactly 1" \
+    "$(echo "$OUT" | grep -o 'found=[0-9]*' | tail -1)" "found=1"
+
+echo ""
+echo "=== skill/command name collision prefers the skill (tie-break) ==="
+COLL_DIR="$TEST_DIR/coll_proj"
+mkdir -p "$COLL_DIR/.clavain/interspect"
+export CLAUDE_PROJECT_DIR="$COLL_DIR"
+unset _INTERSPECT_DB
+_interspect_ensure_db >/dev/null
+COLLDB=$(_interspect_db_path)
+# Same canonical name 'dup:thing' as BOTH a skill and a command.
+DUP_SKILL="$TEST_DIR/coll/skills/testmkt/dup/0.1.0/skills/thing"
+mkdir -p "$DUP_SKILL"
+cat > "$DUP_SKILL/SKILL.md" <<'EOF'
+---
+name: thing
+description: the skill surface of thing
+---
+# thing
+skill body
+EOF
+DUP_CMD="$TEST_DIR/coll/cmds/testmkt/dup/0.1.0/commands"
+mkdir -p "$DUP_CMD"
+cat > "$DUP_CMD/thing.md" <<'EOF'
+---
+name: thing
+description: the command surface of thing
+---
+# thing
+command body
+EOF
+python3 "$INFER" --skills-root "$TEST_DIR/coll/skills" --commands-root "$TEST_DIR/coll/cmds" \
+    --db "$COLLDB" --mock --no-refine 2>/dev/null
+COLL_ROWS=$(sqlite3 "$COLLDB" "SELECT COUNT(*) FROM skill_goals WHERE skill_name='dup:thing';")
+assert_eq "collision yields exactly 1 row" "$COLL_ROWS" "1"
+COLL_FROM=$(sqlite3 "$COLLDB" "SELECT classified_from FROM skill_goals WHERE skill_name='dup:thing';")
+assert_eq "collision resolves to the SKILL (skill_md wins)" "$COLL_FROM" "skill_md"
+
+echo ""
 echo "─────────────────────────"
 echo "PASS: $PASS  FAIL: $FAIL"
 echo "─────────────────────────"
