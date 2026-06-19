@@ -28,6 +28,18 @@ source "${SCRIPT_DIR}/lib-interspect.sh"
 # Ensure DB
 _interspect_ensure_db || { echo "No interspect database found."; exit 0; }
 
+# ─── Collect Skill Signals (sylveste-7aj8.3) ─────────────────────────────────
+# Normalize pending skill evidence into skill_signals before scoring. Each
+# collector is idempotent and fail-open; slow ones (bead_close, no_redirect,
+# tokens) skip gracefully when their data source is absent. Run synchronously
+# here so signals are fresh for this calibration pass.
+SIGNALS_DIR="${CLAUDE_PLUGIN_ROOT}/scripts/signals"
+if [[ -d "$SIGNALS_DIR" ]] && command -v python3 &>/dev/null; then
+    for collector in collect_error collect_bead_close collect_no_redirect collect_tokens; do
+        python3 "${SIGNALS_DIR}/${collector}.py" --db "$_INTERSPECT_DB" 2>&1 || true
+    done
+fi
+
 # Compute scores
 scores=$(_interspect_compute_agent_scores)
 if [[ "$scores" == "[]" || -z "$scores" ]]; then
