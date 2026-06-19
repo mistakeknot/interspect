@@ -468,10 +468,16 @@ def mock_classify(skill_text: str) -> str:
     t = skill_text.lower()
     audit_kw = ("audit", "review", "verify", "coverage", "gate", "lint", "check")
     search_kw = ("search", "retriev", "lookup", "recall", "find", "query", "index")
+    orch_kw = (
+        "sequenc", "orchestrat", "phase", "lifecycle", "workflow", "pipeline",
+        "dispatch", "brainstorm", "ship",
+    )
     if any(k in t for k in audit_kw):
         w = {"speed": 0.1, "precision": 0.3, "completeness": 0.6}
     elif any(k in t for k in search_kw):
         w = {"speed": 0.7, "precision": 0.2, "completeness": 0.1}
+    elif any(k in t for k in orch_kw):  # workflow/orchestration (e.g. /sprint)
+        w = {"speed": 0.15, "precision": 0.45, "completeness": 0.4}
     else:  # default: reasoning/implementation
         w = {"speed": 0.2, "precision": 0.6, "completeness": 0.2}
     return json.dumps(w)
