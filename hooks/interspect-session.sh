@@ -59,6 +59,14 @@ fi
 # Consume kernel events (catch up since last session)
 _interspect_consume_kernel_events "$SESSION_ID" 2>/dev/null || true
 
+# Skill evidence catch-up ingest (sylveste-7aj8.2): drain any Skill rows
+# accumulated since the last run into evidence + skill_signals. Backgrounded
+# and fail-open so it never delays or breaks session start.
+if command -v python3 &>/dev/null; then
+    ( python3 "${SCRIPT_DIR}/../scripts/ingest-skill-audit.py" \
+        --db "$_INTERSPECT_DB" >/dev/null 2>&1 || true ) &
+fi
+
 # Classify session source for calibration weighting
 BEAD_ID=$(cat /tmp/interstat-bead-"${SESSION_ID}" 2>/dev/null || echo "")
 SESSION_SOURCE="normal"
