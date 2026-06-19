@@ -24,9 +24,6 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty') || exit 0
 
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty') || exit 0
 
-# Only process Task tool (agent dispatch)
-[[ "$TOOL_NAME" == "Task" ]] || exit 0
-
 # Source shared library
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 source "${SCRIPT_DIR}/lib-interspect.sh"
@@ -38,6 +35,19 @@ fi
 
 # Ensure DB exists
 _interspect_ensure_db || exit 0
+
+# Skill evidence ingest (sylveste-7aj8.2): cheap incremental drain of the
+# tool-invocation log into evidence + skill_signals. Fire-and-forget,
+# backgrounded — must never block or fail the hook. The watermark keeps
+# repeated runs cheap. Throttled to Skill PostToolUse events so we don't spawn
+# a subprocess on every tool call; the SessionStart catch-up covers the rest.
+if [[ "$TOOL_NAME" == "Skill" ]] && command -v python3 &>/dev/null; then
+    ( python3 "${SCRIPT_DIR}/../scripts/ingest-skill-audit.py" \
+        --db "$_INTERSPECT_DB" >/dev/null 2>&1 || true ) &
+fi
+
+# Only process Task tool (agent dispatch)
+[[ "$TOOL_NAME" == "Task" ]] || exit 0
 
 # Extract agent dispatch details from tool input
 SUBAGENT_TYPE=$(echo "$INPUT" | jq -r '.tool_input.subagent_type // "unknown"') || SUBAGENT_TYPE="unknown"
