@@ -359,9 +359,9 @@ def extract_prompt_input(text: str) -> str:
 
 
 _PROMPT_TEMPLATE = """\
-You classify a Claude Code "skill" into three goal weights that describe what \
-the skill optimizes for. Output STRICT JSON ONLY — no prose, no code fences, \
-no explanation — an object with exactly these float keys summing to 1.0:
+You classify a Claude Code "skill" or "command" into three goal weights that \
+describe what it optimizes for. Output STRICT JSON ONLY — no prose, no code \
+fences, no explanation — an object with exactly these float keys summing to 1.0:
 
   {{"speed": <float>, "precision": <float>, "completeness": <float>}}
 
@@ -370,17 +370,22 @@ Definitions:
   - precision:    reasoning/implementation/correctness; getting one thing right.
   - completeness: audit/review/coverage; not missing anything; thoroughness.
 
-Few-shot examples (skill description -> weights):
+Few-shot examples (description -> weights):
   retrieval/search skill (e.g. intersearch, recall):
       {{"speed": 0.7, "precision": 0.2, "completeness": 0.1}}
   reasoning/implementation skill (e.g. clavain:work):
       {{"speed": 0.2, "precision": 0.6, "completeness": 0.2}}
   audit/review skill (e.g. quality-gates, interwatch:audit):
       {{"speed": 0.1, "precision": 0.3, "completeness": 0.6}}
+  workflow/orchestration command (e.g. clavain:sprint — sequences brainstorm,
+  plan, execute, review, ship; correctness of each step and full coverage of the
+  lifecycle both matter, speed least):
+      {{"speed": 0.15, "precision": 0.45, "completeness": 0.4}}
 
-Classify this skill. Output the JSON object only.
+Judge from the description — do NOT assume a command is always orchestration.
+Output the JSON object only.
 
-SKILL:
+ENTITY:
 {skill_text}
 """
 
