@@ -350,18 +350,10 @@ def mock_classify(skill_text: str) -> str:
     return json.dumps(w)
 
 
-def claude_classify(skill_text: str, model: str) -> str:
-    """Invoke `claude -p` non-interactively and return its stdout text.
-
-    Form: claude -p --model <id> --output-format text "<prompt>"
-    Raises ClassifyError on a missing binary, non-zero exit, or empty output.
-    """
-    if shutil.which("claude") is None:
-        raise ClassifyError("claude binary not on PATH")
-    prompt = build_prompt(skill_text)
+def _run_claude(argv: list[str], prompt: str) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(
-            ["claude", "-p", "--model", model, "--output-format", "text", prompt],
+            argv + [prompt],
             capture_output=True,
             text=True,
             timeout=120,
@@ -370,13 +362,44 @@ def claude_classify(skill_text: str, model: str) -> str:
         raise ClassifyError(f"claude -p timed out: {e}")
     except OSError as e:
         raise ClassifyError(f"claude -p failed to launch: {e}")
-    if proc.returncode != 0:
-        raise ClassifyError(
-            f"claude -p exited {proc.returncode}: {proc.stderr.strip()[:200]}"
-        )
-    out = proc.stdout.strip()
-    if not out:
-        raise ClassifyError("claude -p produced empty output")
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def claude_classify(skill_text: str, model: str) -> str:
+    """Invoke `claude -p` non-interactively and return its stdout text.
+
+    Primary form (hook-free, the correct mode for a headless classifier):
+        claude -p --bare --model <id> --output-format text "<prompt>"
+    `--bare` skips hooks/LSP/plugins so a host SessionStart hook can't consume
+    the turn — but it pins auth to ANTHROPIC_API_KEY/apiKeyHelper. When that
+    fails (e.g. an OAuth/Max-login host with no API key, which prints
+    "Please run /login"), fall back to the standard invocation, which honors
+    OAuth auth at the cost of host hooks possibly polluting output (the
+    defensive JSON extractor in parse_and_normalize tolerates surrounding prose).
+
+    Raises ClassifyError on a missing binary, non-zero exit, or empty output.
+    """
+    if shutil.which("claude") is None:
+        raise ClassifyError("claude binary not on PATH")
+    prompt = build_prompt(skill_text)
+
+    bare = ["claude", "-p", "--bare", "--model", model, "--output-format", "text"]
+    rc, out, err = _run_claude(bare, prompt)
+    # --bare with no API key prints a login notice to stdout and exits 0 — detect
+    # that (and any non-zero/empty result) and retry without --bare.
+    bare_unusable = (
+        rc != 0
+        or not out
+        or "run /login" in out.lower()
+        or "not logged in" in out.lower()
+    )
+    if bare_unusable:
+        std = ["claude", "-p", "--model", model, "--output-format", "text"]
+        rc, out, err = _run_claude(std, prompt)
+        if rc != 0:
+            raise ClassifyError(f"claude -p exited {rc}: {err[:200]}")
+        if not out:
+            raise ClassifyError("claude -p produced empty output")
     return out
 
 
