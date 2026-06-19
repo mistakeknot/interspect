@@ -155,6 +155,20 @@ def default_skills_roots() -> list[Path]:
     ]
 
 
+def default_commands_roots() -> list[Path]:
+    """Real commands roots, in scan order.
+
+    The plugin cache root is shared with skills — the command globber pulls the
+    `<marketplace>/<plugin>/<version>/commands/<cmd>.md` layout out of it. The user
+    commands dir is flat (`~/.claude/commands/<cmd>.md`, bare-name namespace).
+    """
+    home = Path(os.path.expanduser("~"))
+    return [
+        home / ".claude" / "plugins" / "cache",  # namespaced plugin commands
+        home / ".claude" / "commands",  # user commands (bare-name namespace)
+    ]
+
+
 # ─── Skill enumeration ───────────────────────────────────────────────────────
 
 
