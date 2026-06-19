@@ -7,3 +7,7 @@ __pycache__/
 .serena/
 .tldrs/
 .claude/*.local.md
+# Local interspect runtime state — never track the evidence DB (sylveste-7aj8.3 cleanup)
+.clavain/interspect/*.db
+.clavain/interspect/*.db-wal
+.clavain/interspect/*.db-shm
