@@ -812,9 +812,22 @@ def main() -> int:
         "--skills-root",
         action="append",
         default=None,
-        help="Override skills root (repeatable). Default: real plugin cache + user skills.",
+        help="Override skills root (repeatable). Default: real plugin cache + user skills. "
+        "When given without --commands-root, the same roots are ALSO scanned for "
+        "commands (a fixture root can hold both layouts).",
     )
-    ap.add_argument("--skill", default=None, help="Classify only this canonical skill name")
+    ap.add_argument(
+        "--commands-root",
+        action="append",
+        default=None,
+        help="Override commands root (repeatable). Default: real plugin cache + user commands. "
+        "Falls back to --skills-root when only that is given.",
+    )
+    ap.add_argument(
+        "--skill",
+        default=None,
+        help="Classify only this canonical skill OR command name",
+    )
     ap.add_argument("--mock", action="store_true", help="Deterministic stub classifier (no API)")
     ap.add_argument("--dry-run", action="store_true", help="Print would-be weights, no writes")
     ap.add_argument("--force", action="store_true", help="Re-classify even if hash unchanged")
