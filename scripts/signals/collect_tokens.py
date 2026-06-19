@@ -114,13 +114,21 @@ def cass_timeline(since_days: int) -> list[dict] | None:
 
 
 def _usage_tokens(usage: dict) -> int:
+    """Marginal API token cost for one assistant turn.
+
+    Deliberately EXCLUDES ``cache_read_input_tokens``: cache reads re-count the
+    same cached prefix on every turn, so they scale with conversation length
+    (turn count) rather than with marginal work, and are billed at ~0.1x. Summing
+    them across a long session inflates the total ~10-12x and swamps the real
+    cost difference between skill / no-skill sessions. Marginal cost =
+    ``input + output + cache_creation`` (the one-time prompt write + generation).
+    """
     if not isinstance(usage, dict):
         return 0
     return (
         int(usage.get("input_tokens", 0) or 0)
         + int(usage.get("output_tokens", 0) or 0)
         + int(usage.get("cache_creation_input_tokens", 0) or 0)
-        + int(usage.get("cache_read_input_tokens", 0) or 0)
     )
 
 
