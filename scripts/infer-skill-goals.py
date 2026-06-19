@@ -174,7 +174,8 @@ def default_commands_roots() -> list[Path]:
 
 class SkillEntry(NamedTuple):
     name: str  # canonical namespaced name, e.g. "intersearch:session-search"
-    path: Path  # absolute path to SKILL.md
+    path: Path  # absolute path to SKILL.md (or a command .md)
+    kind: str = "skill"  # "skill" or "command" — drives the classified_from value
 
 
 def _plugin_namespaced_name(skill_md: Path, cache_root: Path) -> str | None:
