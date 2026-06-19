@@ -2840,8 +2840,10 @@ _interspect_insert_evidence() {
     fi
 
     # Validate source_kind (sylveste-sfhq.1: telemetry fusion)
+    # 'skill' added sylveste-7aj8.2 (DB CHECK already allows it; this bash
+    # gate was the remaining blocker for bash-path skill inserts).
     case "$source_kind" in
-        agent|tool|pattern) ;;
+        agent|tool|pattern|skill) ;;
         *) return 1 ;;
     esac
 
