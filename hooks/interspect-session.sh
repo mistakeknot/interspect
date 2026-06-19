@@ -65,6 +65,22 @@ _interspect_consume_kernel_events "$SESSION_ID" 2>/dev/null || true
 if command -v python3 &>/dev/null; then
     ( python3 "${SCRIPT_DIR}/../scripts/ingest-skill-audit.py" \
         --db "$_INTERSPECT_DB" >/dev/null 2>&1 || true ) &
+
+    # Skill-signal collectors (sylveste-7aj8.3): normalize pending skill
+    # evidence into skill_signals. The slow collectors (bead_close, no_redirect,
+    # tokens) read .beads/issues.jsonl, session transcripts, and cass — all
+    # fail-open. Backgrounded and capped via --limit so session start stays
+    # cheap. The inline 'error' signal is written by ingest, so its catch-up
+    # collector is omitted here.
+    _SIGNALS_DIR="${SCRIPT_DIR}/../scripts/signals"
+    if [[ -d "$_SIGNALS_DIR" ]]; then
+        (
+            for _c in collect_bead_close collect_no_redirect collect_tokens; do
+                python3 "${_SIGNALS_DIR}/${_c}.py" --db "$_INTERSPECT_DB" \
+                    --limit 200 >/dev/null 2>&1 || true
+            done
+        ) &
+    fi
 fi
 
 # Classify session source for calibration weighting
