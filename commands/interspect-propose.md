@@ -189,3 +189,22 @@ Overlay **{overlay_id}** created for {agent}.
 
 The agent will receive this tuning instruction in future reviews.
 ```
+
+## Skill Tuning Proposals (`--source-kind=skill`)
+
+When `--source-kind=skill` is passed, list skill-tuning candidates instead of agent exclusions.
+
+```bash
+# Skills already proposed (pending approval)
+_interspect_read_routing_overrides | jq -r '.overrides[] | select(.kind=="skill_tune" and .state=="proposed") | "PENDING  \(.skill)  \(.action)"'
+```
+
+For each skill with ≥10 invocations whose worst signal shows a deficit (see the
+`skills` block in `routing-calibration.json`, or `scripts/score-skills.py`):
+1. Resolve the action: `ACTION=$(_interspect_select_skill_action "$skill")`
+2. Generate the body: `CONTENT=$(_interspect_generate_skill_overlay "$skill" "$ACTION")`
+3. Propose it: `_interspect_propose_skill_tune "$skill" "$ACTION" "$CONTENT" "$EVIDENCE_IDS"`
+
+Safe-list actions (`tighten_description`, `when_to_use_add`) auto-apply under
+`/interspect:enable-autonomy` via `/interspect:tune --source-kind=skill`; body
+rewrites and availability changes remain propose-only.
