@@ -47,6 +47,19 @@ Three hooks collect evidence passively:
 
 Evidence accumulates in SQLite (`.clavain/interspect/interspect.db`). When patterns reach counting-rule thresholds, routing overrides can be proposed and applied. Applied overrides enter a canary period (20 uses over 14 days, 20% regression threshold).
 
+## Skill Calibration
+
+The same closed loop also tunes **skills**, not just agents. Every Claude Code
+`Skill` invocation captured in `~/.claude/audit.log` is drained into the evidence
+store (`source_kind='skill'`), scored across four signals (`tokens`, `error`,
+`no_redirect`, `bead_close`) against per-skill goal weights, and — when a skill's
+description triggers too eagerly or too rarely — turned into an overlay at
+`~/.claude/skill-overlays/<plugin>:<skill>.md` that the skill loader merges over
+the source SKILL.md. Safe-list patches (`tighten_description`, `when_to_use_add`)
+auto-apply under autonomy with canary monitoring; body rewrites and availability
+changes are always propose-only. Interspect reads only `~/.claude/audit.log` for
+this — `tool-time` keeps its own `events.jsonl` untouched.
+
 ## Architecture
 
 - **12 commands** — analysis, override management, canary monitoring, diagnostics
