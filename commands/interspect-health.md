@@ -107,7 +107,56 @@ INTEGRITY=$(sqlite3 "$DB" "PRAGMA integrity_check;" | head -1)
 - If all OK: "All channels healthy. Continue using /interspect:correction to build evidence."}
 ```
 
+## Skill Signal Coverage (`--source-kind=skill`)
+
+When `--source-kind=skill` is passed, diagnose the skill-calibration channels
+instead of (or in addition to) the agent channels.
+
+```bash
+# Skill evidence ingestion
+SKILL_EV_7D=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source_kind='skill' AND ts > datetime('now','-7 days');")
+SKILL_WATERMARK=$(sqlite3 "$DB" "SELECT MAX(last_skill_audit_ts) FROM sessions;")
+
+# Per-signal coverage (which collectors are populating skill_signals)
+SIGNAL_COVERAGE=$(sqlite3 -separator ' | ' "$DB" "
+  SELECT signal_kind, COUNT(*) AS rows, COUNT(DISTINCT skill_name) AS skills,
+         MAX(observed_at) AS last
+  FROM skill_signals
+  GROUP BY signal_kind;")
+
+# Dark skills: invoked (evidence) but no signals collected yet
+DARK_SKILLS=$(sqlite3 "$DB" "
+  SELECT COUNT(DISTINCT e.source) FROM evidence e
+  WHERE e.source_kind='skill'
+    AND NOT EXISTS (SELECT 1 FROM skill_signals s WHERE s.skill_name = e.source);")
+
+# Goal classification coverage
+GOALS_CLASSIFIED=$(sqlite3 "$DB" "SELECT COUNT(*) FROM skill_goals;")
+GOALS_OBSERVED=$(sqlite3 "$DB" "SELECT COUNT(*) FROM skill_goals WHERE classified_from='observed';")
+```
+
+Report:
+```
+### Skill Signal Channels
+| Signal | Rows | Skills | Last Event | Status |
+|--------|-----:|-------:|------------|--------|
+| tokens | … | … | … | {OK if any in 7d} |
+| error | … | … | … | … |
+| no_redirect | … | … | … | … |
+| bead_close | … | … | … | … |
+
+- Skill evidence (7d): {SKILL_EV_7D}; audit watermark: {SKILL_WATERMARK}
+- Dark skills (invoked, no signals yet): {DARK_SKILLS}
+- Goals classified: {GOALS_CLASSIFIED} ({GOALS_OBSERVED} refined from observed signal mix)
+```
+
+Recommendations:
+- A signal with 0 rows: that collector isn't running — check `commands/calibrate.md` wiring and `scripts/signals/collect_<signal>.py`.
+- `tokens` empty but others present: the CASS analytics join (`os/Alwe`) is unavailable — expected until CASS data lands.
+- Many dark skills: run `/interspect:calibrate` (drives the collectors) after invocations accumulate.
+
 ## Edge Cases
 
 - **No database:** Report "Interspect database not initialized. It will be created automatically on next session start or when running `/interspect:correction`."
 - **All channels inactive:** This is normal for a fresh install. Guide the user to generate first evidence.
+- **No skill signals:** Skill calibration needs the collectors to have run at least once after a tracked skill was invoked; this is normal pre-adoption.
