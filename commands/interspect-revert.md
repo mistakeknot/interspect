@@ -29,7 +29,8 @@ DB=$(_interspect_db_path)
 
 ## Parse Target
 
-Three target shapes:
+Four target shapes:
+- `--source-kind=skill <skill>` or `skill:<skill>` — revert a skill overlay (7aj8.7). Strip into `SKILL`, set `KIND=skill`, skip directly to "Skill Overlay Revert" below.
 - `tool:<source>` — disable a tool remediation (sfhq.4). Strip the `tool:` prefix into `TOOL_SOURCE`, set `KIND=tool`, skip directly to "Tool Remediation Revert" below.
 - 7+ hex chars — target by commit SHA.
 - Otherwise — target by agent name (`AGENT`), set `KIND=agent`.
