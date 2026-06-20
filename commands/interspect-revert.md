@@ -249,3 +249,33 @@ under "## Tool Usage" and remove obsolete entries manually if desired.
 Note: tool remediations don't have a routing-override-style blacklist concept — patterns
 will surface again if new tool-time evidence accumulates (apply with a different overlay_id
 or refresh the existing rules).
+
+## Skill Overlay Revert
+
+(Only runs if `KIND=skill` from "Parse Target")
+
+```bash
+_interspect_validate_skill_name "$SKILL" || { echo "Invalid skill name: ${SKILL}"; exit 1; }
+OVERLAY="${HOME}/.claude/skill-overlays/${SKILL}.md"
+HAS_OVERLAY=false; [[ -f "$OVERLAY" ]] && HAS_OVERLAY=true
+HAS_ENTRY=$(_interspect_read_routing_overrides | jq -r --arg k "skill:${SKILL}" 'any(.overrides[]; .agent==$k and .state!="reverted")')
+
+if [[ "$HAS_OVERLAY" != true && "$HAS_ENTRY" != true ]]; then
+    echo "No active skill overlay or proposal found for ${SKILL}."
+else
+    _interspect_disable_skill_overlay "$SKILL"
+fi
+```
+
+`_interspect_disable_skill_overlay` removes `~/.claude/skill-overlays/<skill>.md`,
+marks the `modifications` row `reverted`, and flips the `routing-overrides.json`
+`skill_tune` entry to `state='reverted'`. This is also the path the canary uses
+on an auto-revert (a >20%/signal AND >10%/composite regression).
+
+### Report (Skill)
+
+```
+Reverted skill overlay for **{skill}**.
+The overlay file was removed; the skill loader falls back to the source SKILL.md.
+Re-tune with `/interspect:tune --source-kind=skill {skill}` once new signals accumulate.
+```
