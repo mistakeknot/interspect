@@ -5426,7 +5426,8 @@ _interspect_evaluate_skill_canary() {
             _interspect_disable_skill_overlay "$skill" >/dev/null 2>&1 || true
         fi
         # Belt-and-suspenders: ensure the row is marked reverted even if name lookup failed.
-        _interspect_sqlite_write "$db" "UPDATE modifications SET status = 'reverted' WHERE id = ${mod_id} AND status = 'applied';" || true
+        # Redirect stdout so the sqlite PRAGMA echo does not pollute the verdict.
+        _interspect_sqlite_write "$db" "UPDATE modifications SET status = 'reverted' WHERE id = ${mod_id} AND status = 'applied';" >/dev/null 2>&1 || true
         echo "reverted"
         return 0
     fi
