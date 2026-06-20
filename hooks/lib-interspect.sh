@@ -4884,3 +4884,550 @@ _interspect_disable_tool_remediation() {
     echo "SUCCESS: Tool remediation ${overlay_id} disabled for ${source}."
     return 0
 }
+
+# ─── Skill calibration: tune overlays + canary + autonomy (sylveste-7aj8.6/.7) ─
+#
+# Third source_kind in the tune family, after agent overlays (sfhq.3) and tool
+# remediations (sfhq.4). Differences from those precedents:
+#   • Overlay files live in ~/.claude/skill-overlays/<plugin>:<skill>.md (USER
+#     HOME, read by the Claude Code skill loader) — NOT in the project repo. So
+#     the overlay file itself is not git-committed; only the routing-overrides.json
+#     entry (kind=skill_tune) is repo-tracked.
+#   • Canary samples go in skill_canary_samples (per-signal deltas), not the
+#     agent/tool-shaped canary_samples table.
+#   • Autonomy is gated per-ACTION via .clavain/interspect/skill-autonomy-policy.json
+#     (tighten_description/when_to_use_add auto-apply; body rewrites / availability
+#     propose-only) — layered on top of the existing global autonomy switch.
+
+# Validate a skill name. Accepts bare "<skill>" or namespaced "<plugin>:<skill>"
+# (lowercase, digits, hyphens; exactly one optional colon). Rejects traversal,
+# slashes, and shell-injection metacharacters.
+# Args: $1=skill_name
+# Returns: 0 if valid, 1 if not
+_interspect_validate_skill_name() {
+    local name="$1"
+    if [[ ! "$name" =~ ^[a-z][a-z0-9-]*(:[a-z][a-z0-9-]*)?$ ]]; then
+        echo "ERROR: Invalid skill name '${name}'. Must match <skill> or <plugin>:<skill> (lowercase, hyphens)." >&2
+        return 1
+    fi
+    return 0
+}
+
+# Resolve the on-disk overlay path for a skill. Lives under $HOME so the skill
+# loader can merge it over the source SKILL.md regardless of active project.
+# Args: $1=skill_name
+# Output: absolute path on stdout
+_interspect_skill_overlay_path() {
+    local name="$1"
+    _interspect_validate_skill_name "$name" || return 1
+    printf '%s/.claude/skill-overlays/%s.md' "${HOME}" "$name"
+}
+
+# Built-in per-action autonomy defaults (used when the policy file is absent).
+_INTERSPECT_SKILL_AUTO_APPLY_DEFAULT="tighten_description when_to_use_add"
+_INTERSPECT_SKILL_PROPOSE_ONLY_DEFAULT="skill_md_body_rewrite availability"
+
+# Load the per-action skill autonomy policy into space-separated globals.
+# Source: .clavain/interspect/skill-autonomy-policy.json with shape
+#   {"auto_apply":[...], "propose_only":[...]}. Defaults applied if missing.
+# Sets: _INTERSPECT_SKILL_AUTO_APPLY, _INTERSPECT_SKILL_PROPOSE_ONLY
+_interspect_load_skill_autonomy_policy() {
+    [[ -n "${_INTERSPECT_SKILL_POLICY_LOADED:-}" ]] && return 0
+    _INTERSPECT_SKILL_POLICY_LOADED=1
+
+    local root
+    root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    local policy="${root}/.clavain/interspect/skill-autonomy-policy.json"
+
+    _INTERSPECT_SKILL_AUTO_APPLY="$_INTERSPECT_SKILL_AUTO_APPLY_DEFAULT"
+    _INTERSPECT_SKILL_PROPOSE_ONLY="$_INTERSPECT_SKILL_PROPOSE_ONLY_DEFAULT"
+
+    if [[ -f "$policy" ]]; then
+        local auto propose
+        auto=$(jq -r '.auto_apply[]? // empty' "$policy" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+        propose=$(jq -r '.propose_only[]? // empty' "$policy" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+        [[ -n "$auto" ]] && _INTERSPECT_SKILL_AUTO_APPLY="$auto"
+        [[ -n "$propose" ]] && _INTERSPECT_SKILL_PROPOSE_ONLY="$propose"
+    fi
+    return 0
+}
+
+# Is an action in the auto-apply safe-list?
+# Args: $1=action
+# Returns: 0 if auto-apply-eligible, 1 otherwise
+_interspect_skill_action_is_auto() {
+    local action="$1"
+    _interspect_load_skill_autonomy_policy
+    local a
+    for a in $_INTERSPECT_SKILL_AUTO_APPLY; do
+        [[ "$a" == "$action" ]] && return 0
+    done
+    return 1
+}
+
+# Emit per-signal recency-naive means for a skill over a trailing window.
+# Output: "<signal_kind>|<mean>" rows (one per signal_kind present).
+# Args: $1=skill_name, $2=window_days (default 30)
+_interspect_skill_signal_means() {
+    local skill="$1" window_days="${2:-30}"
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || return 0
+    local escaped; escaped=$(_interspect_sql_escape "$skill")
+    sqlite3 -separator '|' "$db" "
+        SELECT signal_kind, ROUND(AVG(value), 6)
+        FROM skill_signals
+        WHERE skill_name = '${escaped}'
+          AND observed_at > datetime('now', '-${window_days} days')
+        GROUP BY signal_kind;
+    " 2>/dev/null || true
+}
+
+# Count distinct invocations for a skill in a trailing window.
+# Args: $1=skill_name, $2=window_days (default 30)
+_interspect_skill_invocation_count() {
+    local skill="$1" window_days="${2:-30}"
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || { echo 0; return 0; }
+    local escaped; escaped=$(_interspect_sql_escape "$skill")
+    sqlite3 "$db" "
+        SELECT COUNT(DISTINCT invocation_id)
+        FROM skill_signals
+        WHERE skill_name = '${escaped}'
+          AND observed_at > datetime('now', '-${window_days} days');
+    " 2>/dev/null || echo 0
+}
+
+# Baseline per-signal means as a compact JSON object (pre-overlay snapshot).
+# Args: $1=skill_name, $2=window_days (default 30)
+# Output: JSON like {"tokens":0.7,"error":0.95,...} ({} if no signals)
+_interspect_skill_baseline_json() {
+    local skill="$1" window_days="${2:-30}"
+    local out="{}" line k v
+    while IFS='|' read -r k v; do
+        [[ -z "$k" ]] && continue
+        out=$(echo "$out" | jq -c --arg k "$k" --argjson v "${v:-0}" '. + {($k): $v}')
+    done < <(_interspect_skill_signal_means "$skill" "$window_days")
+    printf '%s' "$out"
+}
+
+# Select the tune action from the dominant signal deficit. Mirrors the plan's
+# Task 6 Step 2 mapping. Reads trailing-30d signal means.
+#   error      worst (deficit > 0.2)  → skill_md_body_rewrite (propose-only)
+#   no_redirect worst                 → tighten_description
+#   tokens      worst                 → when_to_use_add
+#   all signals healthy + low usage   → availability (propose-only)
+#   otherwise                         → tighten_description (mild default)
+# Args: $1=skill_name
+# Output: one action keyword on stdout
+_interspect_select_skill_action() {
+    local skill="$1"
+    local t_err="1.0" t_nr="1.0" t_tok="1.0"
+    local k v
+    while IFS='|' read -r k v; do
+        case "$k" in
+            error) t_err="$v" ;;
+            no_redirect) t_nr="$v" ;;
+            tokens) t_tok="$v" ;;
+        esac
+    done < <(_interspect_skill_signal_means "$skill")
+
+    # Deficits (1 - mean); pick the largest if it clears the 0.2 floor.
+    local action
+    action=$(awk -v e="$t_err" -v n="$t_nr" -v k="$t_tok" 'BEGIN {
+        de = 1 - e; dn = 1 - n; dk = 1 - k;
+        floor = 0.2;
+        best = de; pick = "error";
+        if (dn > best) { best = dn; pick = "no_redirect" }
+        if (dk > best) { best = dk; pick = "tokens" }
+        if (best < floor) { print "none"; exit }
+        if (pick == "error") print "skill_md_body_rewrite";
+        else if (pick == "no_redirect") print "tighten_description";
+        else print "when_to_use_add";
+    }')
+
+    if [[ "$action" == "none" ]]; then
+        local invs; invs=$(_interspect_skill_invocation_count "$skill")
+        if (( invs < ${_INTERSPECT_SKILL_MIN_SIGNALS:-10} )); then
+            echo "availability"
+        else
+            echo "tighten_description"
+        fi
+        return 0
+    fi
+    echo "$action"
+}
+
+# Generate the skill overlay body (no frontmatter) for an action. The body uses
+# two named sections the skill loader recognises: description-overlay and
+# when-to-use-overlay. body rewrites and availability are advisory text.
+# Args: $1=skill_name, $2=action
+# Output: markdown body on stdout; returns 1 if no signal evidence
+_interspect_generate_skill_overlay() {
+    local skill="$1" action="${2:-}"
+    _interspect_validate_skill_name "$skill" || return 1
+    [[ -z "$action" ]] && action=$(_interspect_select_skill_action "$skill")
+
+    local means; means=$(_interspect_skill_signal_means "$skill")
+    if [[ -z "$means" ]]; then
+        echo "No skill-signal evidence found for ${skill}."
+        return 1
+    fi
+
+    local invs; invs=$(_interspect_skill_invocation_count "$skill")
+    local report=""
+    local k v
+    while IFS='|' read -r k v; do
+        [[ -z "$k" ]] && continue
+        report+="- ${k}: ${v}"$'\n'
+    done <<< "$means"
+
+    local content=""
+    case "$action" in
+        tighten_description)
+            content+="## description-overlay"$'\n\n'
+            content+="Narrow when this skill auto-triggers. Recent signals (${invs} invocations) show redirect/over-eager activation:"$'\n\n'
+            content+="${report}"$'\n'
+            content+="Apply only when the request clearly matches this skill's core purpose; defer to a more specific skill when the match is partial."$'\n'
+            ;;
+        when_to_use_add)
+            content+="## when-to-use-overlay"$'\n\n'
+            content+="Add negative triggers — situations where this skill should NOT fire (token/utilization signals indicate low marginal value, ${invs} invocations):"$'\n\n'
+            content+="${report}"$'\n'
+            content+="- Skip for trivial one-shot lookups already answerable inline."$'\n'
+            content+="- Skip when a cheaper, more targeted skill covers the request."$'\n'
+            ;;
+        skill_md_body_rewrite)
+            content+="## description-overlay"$'\n\n'
+            content+="PROPOSED (body rewrite — human review required). Error signal is degraded across ${invs} invocations:"$'\n\n'
+            content+="${report}"$'\n'
+            content+="Review the SKILL.md body for steps that fail or mislead; this overlay does not auto-apply."$'\n'
+            ;;
+        availability)
+            content+="## when-to-use-overlay"$'\n\n'
+            content+="PROPOSED (availability adjustment — human review required). Signals are healthy but utilization is low (${invs} invocations):"$'\n\n'
+            content+="${report}"$'\n'
+            content+="Consider broadening the description so the skill surfaces for more matching requests."$'\n'
+            ;;
+        *)
+            echo "ERROR: Unknown skill action '${action}'." >&2
+            return 1
+            ;;
+    esac
+    printf '%s' "$content"
+}
+
+# Upsert a kind=skill_tune entry into routing-overrides.json. Dedups on the
+# namespaced agent sentinel "skill:<name>" (keeps unique_by(.agent) in the agent
+# apply path well-behaved; real agents are fd-*, so no collision). Atomic write
+# + git commit, mirroring the propose/apply precedent.
+# Args: $1=skill $2=action $3=state $4=evidence_ids(JSON) $5=patch
+#       $6=modification_id(int|null) $7=canary_until(iso|"")
+_interspect_upsert_skill_override() {
+    local skill="$1" action="$2" state="$3" evidence_ids="${4:-[]}" patch="$5"
+    local mod_id="${6:-null}" canary_until="${7:-}"
+
+    _interspect_validate_skill_name "$skill" || return 1
+    if ! printf '%s\n' "$evidence_ids" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        evidence_ids="[]"
+    fi
+
+    local root
+    root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    local filepath="${FLUX_ROUTING_OVERRIDES_PATH:-.claude/routing-overrides.json}"
+    _interspect_validate_overrides_path "$filepath" || return 1
+    local fullpath="${root}/${filepath}"
+
+    local key="skill:${skill}"
+    local created; created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local sanitized_patch; sanitized_patch=$(_interspect_sanitize "$patch" 2000 2>/dev/null || printf '%s' "$patch")
+
+    local current
+    current=$(_interspect_read_routing_overrides)
+
+    local entry
+    entry=$(jq -n \
+        --arg agent "$key" \
+        --arg kind "skill_tune" \
+        --arg skill "$skill" \
+        --arg action "$action" \
+        --arg state "$state" \
+        --argjson evidence_ids "$evidence_ids" \
+        --arg patch "$sanitized_patch" \
+        --arg created "$created" \
+        --arg created_by "interspect-tune" \
+        --argjson modification_id "${mod_id:-null}" \
+        --arg canary_until "$canary_until" \
+        '{agent:$agent, kind:$kind, skill:$skill, action:$action, patch:$patch, evidence_ids:$evidence_ids, state:$state, created:$created, created_by:$created_by}
+         + (if $modification_id != null then {modification_id:$modification_id} else {} end)
+         + (if $canary_until != "" then {canary_until:$canary_until} else {} end)')
+
+    local merged
+    merged=$(echo "$current" | jq --argjson e "$entry" --arg key "$key" \
+        '.overrides = ([.overrides[] | select(.agent != $key)] + [$e])')
+
+    mkdir -p "$(dirname "$fullpath")" 2>/dev/null || true
+    local tmpfile="${fullpath}.tmp.$$"
+    echo "$merged" | jq '.' > "$tmpfile" || { rm -f "$tmpfile"; return 1; }
+    if ! jq -e '.' "$tmpfile" >/dev/null 2>&1; then rm -f "$tmpfile"; return 1; fi
+    mv "$tmpfile" "$fullpath"
+
+    git -C "$root" add "$filepath" 2>/dev/null || true
+    git -C "$root" commit --no-verify -m "[interspect] skill_tune ${state}: ${skill} (${action})" >/dev/null 2>&1 || true
+    return 0
+}
+
+# Insert a modifications row for a skill tune and echo the new modification id.
+# Args: $1=skill $2=action $3=status(applied|proposed) $4=baseline_json $5=overlay_rel_or_home_path
+# Output: integer modification id on stdout
+_interspect_insert_skill_modification() {
+    local skill="$1" action="$2" status="$3" baseline="$4" target="$5"
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local e_skill e_action e_baseline e_target
+    e_skill=$(_interspect_sql_escape "$skill")
+    e_action=$(_interspect_sql_escape "$action")
+    e_baseline=$(_interspect_sql_escape "$baseline")
+    e_target=$(_interspect_sql_escape "$target")
+    local group_id="skill/${e_skill}"
+    # INSERT + last_insert_rowid() in ONE sqlite3 process so the id is captured.
+    sqlite3 "$db" "
+        INSERT INTO modifications (group_id, ts, tier, mod_type, target_file, commit_sha, confidence, evidence_summary, status)
+        VALUES ('${group_id}', '${ts}', 'persistent', 'skill_tune', '${e_target}', NULL, 0.8, '${e_baseline}', '${status}');
+        SELECT last_insert_rowid();
+    " 2>/dev/null || echo ""
+}
+
+# Auto-apply path: write the overlay file to ~/.claude/skill-overlays/, record a
+# modifications row + routing-overrides entry (state=active), and arm the canary.
+# Args: $1=skill $2=action $3=content $4=evidence_ids(JSON, default [])
+# Returns: 0 on success; echoes "modification_id=<n>" line on success
+_interspect_write_skill_overlay() {
+    local skill="$1" action="$2" content="$3" evidence_ids="${4:-[]}"
+
+    _interspect_validate_skill_name "$skill" || return 1
+
+    local overlay_path
+    overlay_path=$(_interspect_skill_overlay_path "$skill") || return 1
+
+    # Containment: must stay within ~/.claude/skill-overlays/
+    local overlays_root="${HOME}/.claude/skill-overlays/"
+    case "$overlay_path" in
+        "${overlays_root}"*) ;;
+        *) echo "ERROR: Path escapes skill-overlays directory: ${overlay_path}" >&2; return 1 ;;
+    esac
+
+    if ! content=$(_interspect_sanitize "$content" 2000); then
+        echo "ERROR: Overlay content rejected — instruction-like patterns (prompt injection)" >&2
+        return 1
+    fi
+    [[ -z "$content" ]] && { echo "ERROR: Overlay content empty after sanitization" >&2; return 1; }
+
+    if [[ -f "$overlay_path" ]]; then
+        echo "ERROR: Skill overlay already exists for ${skill}. Revert first: /interspect:revert --source-kind=skill ${skill}" >&2
+        return 1
+    fi
+
+    _interspect_load_confidence
+    local baseline; baseline=$(_interspect_skill_baseline_json "$skill")
+    local ts canary_until
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    canary_until=$(date -u -d "+${_INTERSPECT_CANARY_WINDOW_DAYS:-14} days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || date -u -v+"${_INTERSPECT_CANARY_WINDOW_DAYS:-14}"d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+
+    # Modifications row first — its id links overlay ↔ canary samples.
+    local mod_id
+    mod_id=$(_interspect_insert_skill_modification "$skill" "$action" "applied" "$baseline" "$overlay_path")
+    if ! [[ "$mod_id" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Failed to record skill modification" >&2
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$overlay_path")" 2>/dev/null || { echo "ERROR: cannot create skill-overlays dir" >&2; return 1; }
+    local tmpfile="${overlay_path}.tmp.$$"
+    {
+        printf '%s\n' '---'
+        printf 'overlay_for: %s\n' "$skill"
+        printf 'generated_by: interspect:tune\n'
+        printf 'generated_at: %s\n' "$ts"
+        printf 'action: %s\n' "$action"
+        printf 'modification_id: %s\n' "$mod_id"
+        printf 'evidence_ids: %s\n' "$evidence_ids"
+        printf 'canary_until: %s\n' "$canary_until"
+        printf 'active: true\n'
+        printf '%s\n' '---'
+        printf '%s\n' "$content"
+    } > "$tmpfile" && mv "$tmpfile" "$overlay_path"
+
+    _interspect_upsert_skill_override "$skill" "$action" "active" "$evidence_ids" "$content" "$mod_id" "$canary_until"
+
+    echo "SUCCESS: Skill overlay applied for ${skill} (${action}). Overlay: ${overlay_path}"
+    echo "Canary monitoring active until ${canary_until} (skill_canary_samples)."
+    echo "To undo: /interspect:revert --source-kind=skill ${skill}"
+    echo "modification_id=${mod_id}"
+    return 0
+}
+
+# Propose-only path: record a proposed modification + routing-overrides entry.
+# No overlay file is written (so the skill loader does not pick it up).
+# Args: $1=skill $2=action $3=content $4=evidence_ids(JSON, default [])
+_interspect_propose_skill_tune() {
+    local skill="$1" action="$2" content="$3" evidence_ids="${4:-[]}"
+    _interspect_validate_skill_name "$skill" || return 1
+
+    local baseline; baseline=$(_interspect_skill_baseline_json "$skill")
+    local mod_id
+    mod_id=$(_interspect_insert_skill_modification "$skill" "$action" "proposed" "$baseline" "(proposed)")
+    if ! [[ "$mod_id" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Failed to record skill proposal" >&2
+        return 1
+    fi
+    _interspect_upsert_skill_override "$skill" "$action" "proposed" "$evidence_ids" "$content" "$mod_id" ""
+
+    echo "PROPOSED: skill tune for ${skill} (${action}). Review in /interspect:status --source-kind=skill."
+    echo "To apply: /interspect:approve --source-kind=skill ${skill}"
+    echo "modification_id=${mod_id}"
+    return 0
+}
+
+# Revert/disable a skill overlay: remove the overlay file, mark the modification
+# reverted, and flip the routing-overrides entry to state=reverted.
+# Args: $1=skill
+_interspect_disable_skill_overlay() {
+    local skill="$1"
+    _interspect_validate_skill_name "$skill" || return 1
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    local overlay_path; overlay_path=$(_interspect_skill_overlay_path "$skill") || return 1
+    local e_skill; e_skill=$(_interspect_sql_escape "$skill")
+    local group_id="skill/${e_skill}"
+
+    [[ -f "$overlay_path" ]] && rm -f "$overlay_path"
+
+    _interspect_sqlite_write "$db" "UPDATE modifications SET status = 'reverted'
+        WHERE group_id = '${group_id}' AND status IN ('applied', 'proposed');" || true
+
+    # Mark any active canary samples' parent modification as reverted is implicit;
+    # flip the override entry so status display reflects the revert.
+    local action
+    action=$(_interspect_read_routing_overrides | jq -r --arg k "skill:${skill}" '.overrides[] | select(.agent==$k) | .action // "tighten_description"' 2>/dev/null | head -1)
+    [[ -z "$action" ]] && action="tighten_description"
+    _interspect_upsert_skill_override "$skill" "$action" "reverted" "[]" "" "null" ""
+
+    echo "SUCCESS: Skill overlay reverted for ${skill}."
+    return 0
+}
+
+# Per-action autonomy gate for skills. Composes the global autonomy switch with
+# the per-action safe-list and the shared rate-limit / circuit-breaker / baseline
+# guards. Returns 0 = auto-apply, 1 = propose.
+# Args: $1=skill $2=action
+_interspect_skill_should_auto_apply() {
+    local skill="$1" action="$2"
+
+    _interspect_is_autonomous || return 1
+    _interspect_skill_action_is_auto "$action" || return 1
+
+    # System breaker + global rate limit (shared with the agent/tool path).
+    if _interspect_system_breaker_check; then
+        echo "[interspect] System breaker tripped — skill auto-apply disabled." >&2
+        return 1
+    fi
+    if _interspect_rate_limit_exceeded; then
+        echo "INFO: Rate limit exceeded — forcing propose mode for ${skill}." >&2
+        return 1
+    fi
+    if _interspect_circuit_breaker_tripped "skill/${skill}"; then
+        echo "INFO: Circuit breaker tripped for ${skill} — forcing propose mode." >&2
+        return 1
+    fi
+
+    # Need a minimum baseline of signal evidence before auto-applying.
+    local invs; invs=$(_interspect_skill_invocation_count "$skill")
+    if (( invs < ${_INTERSPECT_SKILL_MIN_SIGNALS:-10} )); then
+        echo "INFO: Insufficient skill signals for ${skill} (${invs}/${_INTERSPECT_SKILL_MIN_SIGNALS:-10}) — forcing propose mode." >&2
+        return 1
+    fi
+    return 0
+}
+
+# Record one skill canary sample (per-signal delta vs. pre-overlay baseline).
+# per_signal_delta = canary_value - baseline_value (negative = regression).
+# Idempotent on (modification_id, invocation_id, signal_kind).
+# Args: $1=mod_id $2=skill $3=invocation_id $4=signal_kind $5=baseline_value $6=canary_value
+_interspect_record_skill_canary_sample() {
+    local mod_id="$1" skill="$2" invocation_id="$3" signal_kind="$4" baseline="$5" value="$6"
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local e_skill e_inv e_sig
+    e_skill=$(_interspect_sql_escape "$skill")
+    e_inv=$(_interspect_sql_escape "$invocation_id")
+    e_sig=$(_interspect_sql_escape "$signal_kind")
+    local delta; delta=$(awk -v c="$value" -v b="${baseline:-0}" 'BEGIN{printf "%.6f", c-b}')
+    local base_sql="${baseline:-NULL}"; [[ -z "$baseline" ]] && base_sql="NULL"
+    _interspect_sqlite_write "$db" "INSERT OR IGNORE INTO skill_canary_samples
+        (modification_id, skill_name, invocation_id, signal_kind, baseline_value, canary_value, per_signal_delta, observed_at)
+        VALUES (${mod_id}, '${e_skill}', '${e_inv}', '${e_sig}', ${base_sql}, ${value}, ${delta}, '${ts}');"
+}
+
+# Evaluate a skill canary. Regression trigger (plan Task 7 Step 2): ANY individual
+# signal regresses > alert_pct (default 20%) AND the composite regresses > 10%.
+# Composite here is the mean of per-signal canary means vs. the mean of baselines
+# (the authoritative goal-weighted score lives in score-skills.py; the canary only
+# needs a stable aggregate to gate on). On trigger, reverts the overlay.
+# Args: $1=mod_id
+# Output: verdict word: "reverted" | "ok" | "pending"
+_interspect_evaluate_skill_canary() {
+    local mod_id="$1"
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    _interspect_load_confidence
+    local alert_pct="${_INTERSPECT_CANARY_ALERT_PCT:-20}"
+    local min_samples="${_INTERSPECT_SKILL_CANARY_MIN_SAMPLES:-3}"
+
+    # Need a minimum number of distinct invocations sampled before judging.
+    local n_inv
+    n_inv=$(sqlite3 "$db" "SELECT COUNT(DISTINCT invocation_id) FROM skill_canary_samples WHERE modification_id = ${mod_id};" 2>/dev/null || echo 0)
+    if (( n_inv < min_samples )); then
+        echo "pending"; return 0
+    fi
+
+    # Per-signal: baseline (constant) vs. mean canary value → relative delta.
+    # Emit "any_regressed" and composite components via awk.
+    local rows
+    rows=$(sqlite3 -separator '|' "$db" "
+        SELECT signal_kind, MAX(baseline_value), AVG(canary_value)
+        FROM skill_canary_samples
+        WHERE modification_id = ${mod_id}
+        GROUP BY signal_kind;
+    " 2>/dev/null)
+    [[ -z "$rows" ]] && { echo "pending"; return 0; }
+
+    local verdict
+    verdict=$(echo "$rows" | awk -F'|' -v alert="$alert_pct" '
+        {
+            sig=$1; base=$2+0; canary=$3+0;
+            if (base > 0) {
+                rel = (canary - base) / base * 100;
+                if (rel <= -alert) any_reg = 1;
+            }
+            sum_base += base; sum_canary += canary; n++;
+        }
+        END {
+            if (n == 0) { print "pending"; exit }
+            comp_rel = (sum_base > 0) ? (sum_canary - sum_base) / sum_base * 100 : 0;
+            if (any_reg == 1 && comp_rel <= -10) print "reverted"; else print "ok";
+        }')
+
+    if [[ "$verdict" == "reverted" ]]; then
+        # Resolve skill from the modification group_id and revert.
+        local skill
+        skill=$(sqlite3 "$db" "SELECT REPLACE(group_id,'skill/','') FROM modifications WHERE id = ${mod_id} LIMIT 1;" 2>/dev/null)
+        if [[ -n "$skill" ]]; then
+            _interspect_disable_skill_overlay "$skill" >/dev/null 2>&1 || true
+        fi
+        # Belt-and-suspenders: ensure the row is marked reverted even if name lookup failed.
+        _interspect_sqlite_write "$db" "UPDATE modifications SET status = 'reverted' WHERE id = ${mod_id} AND status = 'applied';" || true
+        echo "reverted"
+        return 0
+    fi
+    echo "ok"
+    return 0
+}
