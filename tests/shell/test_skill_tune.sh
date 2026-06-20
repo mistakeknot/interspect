@@ -31,7 +31,6 @@ mkdir -p "$CLAUDE_PROJECT_DIR/.clavain/interspect" "$CLAUDE_PROJECT_DIR/.claude"
 
 cd "$CLAUDE_PROJECT_DIR" && git init -q && git config user.name test && git config user.email test@test.com
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$SCRIPT_DIR/hooks/lib-interspect.sh"
 _interspect_ensure_db
 DB=$(_interspect_db_path)
