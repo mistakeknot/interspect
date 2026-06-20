@@ -142,6 +142,20 @@ CREATE TABLE IF NOT EXISTS skill_signals (
 );
 CREATE INDEX IF NOT EXISTS idx_skill_signals_name ON skill_signals(skill_name, signal_kind);
 CREATE INDEX IF NOT EXISTS idx_skill_signals_session ON skill_signals(session_id);
+CREATE TABLE IF NOT EXISTS skill_canary_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    modification_id INTEGER NOT NULL,
+    skill_name TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
+    signal_kind TEXT NOT NULL,
+    baseline_value REAL,
+    canary_value REAL NOT NULL,
+    per_signal_delta REAL NOT NULL,
+    observed_at TEXT NOT NULL,
+    UNIQUE(modification_id, invocation_id, signal_kind)
+);
+CREATE INDEX IF NOT EXISTS idx_skill_canary_mod ON skill_canary_samples(modification_id);
+CREATE INDEX IF NOT EXISTS idx_skill_canary_skill ON skill_canary_samples(skill_name);
 SKILLMIGRATE
         # Add tool-remediation baseline snapshot (sylveste-sfhq.4)
         # Stores JSON map of event_type → count at canary creation time. NULL for agent canaries.
