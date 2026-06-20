@@ -105,8 +105,10 @@ When a routing override is applied, it enters a canary period:
 
 ## Data Storage
 
-- **Evidence DB:** `.clavain/interspect/interspect.db` (SQLite, per-project)
-- **Routing overrides:** `.claude/routing-overrides.json` (cross-repo contract)
+- **Evidence DB:** `.clavain/interspect/interspect.db` (SQLite, per-project). Tables include `evidence` (with `source_kind` ∈ `agent|tool|pattern|skill`), `canary`/`canary_samples` (agent/tool canaries), and the skill-calibration tables `skill_goals`, `skill_signals`, `skill_canary_samples`.
+- **Routing overrides:** `.claude/routing-overrides.json` (cross-repo contract). Carries agent `exclude`/`propose` entries plus `kind:"skill_tune"` entries.
+- **Skill overlays:** `~/.claude/skill-overlays/<plugin>:<skill>.md` (USER HOME — read by the Claude Code skill loader, not repo-tracked).
+- **Skill autonomy policy:** `.clavain/interspect/skill-autonomy-policy.json` (per-action safe-list; defaults baked into `lib-interspect.sh`).
 - **Protected paths:** `.clavain/interspect/protected-paths.json`
 
 ## Integration Points
