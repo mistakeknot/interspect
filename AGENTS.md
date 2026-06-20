@@ -103,6 +103,24 @@ When a routing override is applied, it enters a canary period:
 - **Alert threshold:** 20% regression
 - SessionStart hook injects `additionalContext` warning if canary alerts exist
 
+Skill overlays carry their own canary (`skill_canary_samples`, keyed by the
+applying `modifications.id`): the trigger is **any single signal regressing >20% AND
+the composite regressing >10%**, evaluated each calibrate cycle via
+`_interspect_evaluate_skill_canary` → auto-revert.
+
+## Skill Calibration (sylveste-7aj8)
+
+Generalizes the routing loop from `source_kind='agent'` to skills. Pipeline:
+
+`~/.claude/audit.log` (tool=Skill) → `ingest-skill-audit.py` → `evidence(source_kind='skill')`
+→ four collectors (`scripts/signals/collect_{tokens,bead_close,no_redirect,error}.py`) → `skill_signals`
+→ `infer-skill-goals.py` (Haiku one-shot, `skill_goals`) → `score-skills.py` (weighted composite, `skills` block in `routing-calibration.json`, `schema_version:3`)
+→ `/interspect:tune --source-kind=skill` → overlay at `~/.claude/skill-overlays/` + `kind:"skill_tune"` override → canary → promote/auto-revert.
+
+- **Signal→goal mapping:** `tokens→speed`, `error→precision`, `no_redirect→precision` (0.5×), `bead_close→completeness`.
+- **Per-action autonomy:** `tighten_description` / `when_to_use_add` auto-apply under `/interspect:enable-autonomy`; `skill_md_body_rewrite` / `availability` are propose-only (safe-list in `skill-autonomy-policy.json`).
+- All `/interspect:{tune,propose,approve,revert,status,effectiveness,health}` accept `--source-kind=skill`.
+
 ## Data Storage
 
 - **Evidence DB:** `.clavain/interspect/interspect.db` (SQLite, per-project). Tables include `evidence` (with `source_kind` ∈ `agent|tool|pattern|skill`), `canary`/`canary_samples` (agent/tool canaries), and the skill-calibration tables `skill_goals`, `skill_signals`, `skill_canary_samples`.
