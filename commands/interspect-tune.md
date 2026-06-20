@@ -1,12 +1,16 @@
 ---
 name: interspect-tune
-description: Generate a prompt tuning overlay for an agent, or a CLAUDE.md remediation for a tool source, from accumulated correction/pattern evidence
-argument-hint: "<agent-name> | tool:<tool-source>"
+description: Generate a prompt tuning overlay for an agent, a CLAUDE.md remediation for a tool source, or a skill overlay for a skill, from accumulated evidence
+argument-hint: "<agent-name> | tool:<tool-source> | --source-kind=skill <plugin>:<skill> [--action=<a>] [--dry-run] [--apply]"
 ---
 
 # Interspect Tune
 
-Generate a tuning overlay (agent) or CLAUDE.md remediation (tool) from accumulated evidence.
+Generate a tuning artifact from accumulated evidence. Three modes:
+- **agent** (default): prompt overlay from override/correction evidence
+- **tool** (`tool:<src>`): CLAUDE.md remediation from tool-pattern evidence
+- **skill** (`--source-kind=skill <name>` or `skill:<name>`): skill overlay from
+  per-skill signal evidence (`skill_signals` + `skill_goals`)
 
 <tune_target> #$ARGUMENTS </tune_target>
 
@@ -28,70 +32,93 @@ DB=$(_interspect_db_path)
 
 ## Parse Target
 
-Extract argument from `<tune_target>`. If empty, show usage:
+Extract the argument from `<tune_target>`. If empty, show usage:
 ```
-Usage: /interspect:tune <agent-name>           # generate agent prompt overlay
-       /interspect:tune tool:<tool-source>     # generate CLAUDE.md remediation
+Usage: /interspect:tune <agent-name>                         # agent prompt overlay
+       /interspect:tune tool:<tool-source>                   # CLAUDE.md remediation
+       /interspect:tune --source-kind=skill <plugin>:<skill> # skill overlay
+              [--action=tighten_description|when_to_use_add|skill_md_body_rewrite|availability]
+              [--dry-run] [--apply]
 ```
 
-If the argument starts with `tool:`, set `KIND=tool` and strip the prefix into `TARGET`. Otherwise `KIND=agent`, `TARGET=<argument>`.
+Determine `KIND`:
+- If args contain `--source-kind=skill`, or the argument starts with `skill:`, set `KIND=skill` and strip into `TARGET` (skill name). Collect optional `--action=<a>`, `--dry-run`, `--apply` flags.
+- Else if the argument starts with `tool:`, set `KIND=tool`, strip prefix into `TARGET`.
+- Else `KIND=agent`, `TARGET=<argument>`.
 
 ## Validate
 
 ### Agent mode (KIND=agent)
 
-Verify agent has correction evidence:
 ```bash
 CORRECTION_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE (source = '$TARGET' OR source LIKE '%$TARGET') AND source_kind = 'agent' AND event = 'override';" 2>/dev/null || echo "0")
 ```
-
-If 0: "No corrections found for agent $TARGET. Run `/interspect:correction $TARGET` to record evidence first."
-
-Check if overlay already exists at `.clavain/interspect/overlays/$TARGET/tuning.md`. If so, ask: "Overlay already exists. Regenerate?"
+If 0: "No corrections found for agent $TARGET. Run `/interspect:correction $TARGET` first."
+Check `.clavain/interspect/overlays/$TARGET/tuning.md`; if it exists, ask "Regenerate?".
 
 ### Tool mode (KIND=tool)
 
-Verify tool source has pattern evidence:
 ```bash
 PATTERN_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source = '$TARGET' AND source_kind = 'tool';" 2>/dev/null || echo "0")
 ```
+If 0: "No tool-pattern evidence found for $TARGET."
 
-If 0: "No tool-pattern evidence found for $TARGET. tool-time's bridge populates this on SessionEnd — run a session with the tool first, or check `~/.claude/tool-time/stats.json` for current patterns."
+### Skill mode (KIND=skill)
+
+```bash
+_interspect_validate_skill_name "$TARGET" || { echo "Invalid skill name"; exit 1; }
+SIGNAL_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM skill_signals WHERE skill_name = '$TARGET';" 2>/dev/null || echo "0")
+INVS=$(_interspect_skill_invocation_count "$TARGET")
+HAS_GOALS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM skill_goals WHERE skill_name = '$TARGET';" 2>/dev/null || echo "0")
+```
+- If `SIGNAL_COUNT` is 0: "No skill-signal evidence for $TARGET. Run the collectors (`/interspect:calibrate` runs them) after the skill has been invoked." → stop.
+- If `HAS_GOALS` is 0: warn "No goal weights for $TARGET — run `scripts/infer-skill-goals.py --skill $TARGET` for a precise score. Proceeding with signal-only action selection."
+- Existing overlay at `~/.claude/skill-overlays/$TARGET.md` → ask "Revert and regenerate?" (revert via `_interspect_disable_skill_overlay`).
 
 ## Generate
 
-Both modes call the same dispatcher:
+### Agent / Tool
+
 ```bash
 CONTENT=$(_interspect_generate_overlay "$TARGET" "$KIND")
 ```
 
-If `_interspect_generate_overlay` returns non-zero: report the error and stop.
+### Skill
+
+Resolve the action (explicit `--action` wins; otherwise auto-select from the dominant signal deficit), then generate the overlay body:
+```bash
+ACTION="${EXPLICIT_ACTION:-$(_interspect_select_skill_action "$TARGET")}"
+CONTENT=$(_interspect_generate_skill_overlay "$TARGET" "$ACTION") || { echo "$CONTENT"; exit 1; }
+```
+Action mapping (informational): `no_redirect` deficit → `tighten_description`; `tokens` deficit → `when_to_use_add`; `error` deficit → `skill_md_body_rewrite` (propose-only); healthy signals + low utilization → `availability` (propose-only).
+
+## Dry run
+
+If `--dry-run` was passed (any mode), print the generated `CONTENT` with a header and **exit without writing anything**:
+```
+═══ DRY RUN — proposed <KIND> patch for <TARGET> (<ACTION>) ═══
+<CONTENT>
+══════════════════════════════════════════════════════════════
+```
 
 ## Preview and Confirm
 
-### Agent mode
+### Agent / Tool
 
-Show the generated overlay content via AskUserQuestion:
-- "Apply this tuning overlay" → write file + create canary
-- "Edit content first" → let user modify, then write
-- "Cancel" → no changes
+(unchanged — see agent overlay / tool remediation flows below)
 
-### Tool mode
+### Skill
 
-Tool-mode output is a CLAUDE.md *patch proposal*. Show the generated content with a clear header:
-
+Show `CONTENT` and the resolved `ACTION`. Decide auto-apply vs propose:
+```bash
+if _interspect_skill_should_auto_apply "$TARGET" "$ACTION"; then DECISION=auto; else DECISION=propose; fi
 ```
-═══ CLAUDE.md remediation for tool: $TARGET ═══
-<content>
-══════════════════════════════════════════════
-```
+Offer via AskUserQuestion:
+- "Apply now" → forces the write path (records canary). Honors the per-action safe-list: body rewrites / availability remain propose-only even here.
+- "Propose only" → routing-overrides entry, no overlay file.
+- "Cancel" → no changes.
 
-Offer the user via AskUserQuestion:
-- "Apply" → call `_interspect_write_tool_remediation` (interspect-internal record + canary), then optionally use Edit tool to add the rules to user's CLAUDE.md
-- "Copy to clipboard" → emit content (stdout / clipboard tool)
-- "Cancel" → no changes
-
-Tool mode does NOT write to `.clavain/interspect/overlays/`. Records live at `.clavain/interspect/tool-remediations/<source>/<overlay_id>.md` (separate namespace; agent prompt injection won't pick them up).
+If invoked non-interactively with `--apply`, use the safe-list decision directly.
 
 ## Write
 
@@ -101,38 +128,39 @@ Tool mode does NOT write to `.clavain/interspect/overlays/`. Records live at `.c
 _interspect_write_overlay "$TARGET" "tuning" "$CONTENT" "$DB"
 ```
 
-Creates `.clavain/interspect/overlays/$TARGET/tuning.md`, sets `active: true`, checks token budget (500), creates canary record, git commits.
-
 ### Tool mode
 
 ```bash
-OVERLAY_ID="tuning"   # generate a unique slug if user already has an active record
-_interspect_write_tool_remediation "$TARGET" "$OVERLAY_ID" "$CONTENT"
+_interspect_write_tool_remediation "$TARGET" "tuning" "$CONTENT"
 ```
 
-Atomically:
-- Snapshots baseline pattern counts (JSON: event_type → count) via `_interspect_compute_tool_baseline`
-- Writes `.clavain/interspect/tool-remediations/$TARGET/$OVERLAY_ID.md` with `active: true` + baseline frontmatter
-- Inserts canary row (status='active', 14-day window, `baseline_pattern_counts` populated)
-- Inserts `modifications` row with `mod_type='tool_remediation'`
-- Git commits
+### Skill mode
 
-After the interspect-internal record lands, optionally use the Edit tool to add the suggested rules to the user's CLAUDE.md under a `## Tool Usage` section (separate user-confirmed step).
+Branch on the safe-list decision (and the user's choice above):
+```bash
+if [[ "$DECISION" == "auto" ]] && _interspect_skill_action_is_auto "$ACTION"; then
+    _interspect_write_skill_overlay "$TARGET" "$ACTION" "$CONTENT" "$EVIDENCE_IDS"
+else
+    _interspect_propose_skill_tune "$TARGET" "$ACTION" "$CONTENT" "$EVIDENCE_IDS"
+fi
+```
+- **Auto-apply** writes `~/.claude/skill-overlays/$TARGET.md` (the skill loader merges it over the source SKILL.md), records a `modifications` row (`mod_type='skill_tune'`), a `routing-overrides.json` entry (`kind='skill_tune'`, `state='active'`), and arms the canary (`skill_canary_samples`).
+- **Propose** records the `modifications` row (`status='proposed'`) and the override entry (`state='proposed'`) only — no overlay file is written, so the loader does not pick it up.
 
 ## Summary
 
-### Agent mode
+### Skill mode
 
 Report:
-- Overlay path
-- Token estimate
-- Canary status (20 uses / 14 days)
-- Next: "Use `/interspect:status` to monitor canary, `/interspect:revert $TARGET` to disable"
+- Action chosen and whether it auto-applied or was proposed
+- Overlay path (`~/.claude/skill-overlays/$TARGET.md`) when applied; `modification_id`
+- Canary window (20 invocations / 14 days; per-signal deltas in `skill_canary_samples`)
+- Next: "`/interspect:status --source-kind=skill` to monitor, `/interspect:revert --source-kind=skill $TARGET` to undo"
+
+### Agent mode
+
+Report: overlay path, token estimate, canary status (20 uses / 14 days), next steps.
 
 ### Tool mode
 
-Report:
-- Tool remediation path: `.clavain/interspect/tool-remediations/$TARGET/$OVERLAY_ID.md`
-- Baseline snapshot (event types + counts at apply time)
-- Canary status (14-day window; recurrence visible in `/interspect:status`)
-- Next: "Use `/interspect:revert tool:$TARGET` to disable"
+Report: remediation path, baseline snapshot, canary status (14-day window), next steps.
