@@ -310,6 +310,26 @@ CREATE TABLE IF NOT EXISTS skill_signals (
 CREATE INDEX IF NOT EXISTS idx_skill_signals_name ON skill_signals(skill_name, signal_kind);
 CREATE INDEX IF NOT EXISTS idx_skill_signals_session ON skill_signals(session_id);
 
+-- Skill canary samples (sylveste-7aj8.7): per-invocation per-signal deltas vs.
+-- the pre-overlay baseline, keyed by the modifications.id that applied the
+-- overlay. Deliberately SEPARATE from canary_samples (which is agent/tool-shaped:
+-- override_rate/fp_rate/finding_density keyed by canary_id). per_signal_delta =
+-- canary_value - baseline_value; negative = regression.
+CREATE TABLE IF NOT EXISTS skill_canary_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    modification_id INTEGER NOT NULL,
+    skill_name TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
+    signal_kind TEXT NOT NULL,
+    baseline_value REAL,
+    canary_value REAL NOT NULL,
+    per_signal_delta REAL NOT NULL,
+    observed_at TEXT NOT NULL,
+    UNIQUE(modification_id, invocation_id, signal_kind)
+);
+CREATE INDEX IF NOT EXISTS idx_skill_canary_mod ON skill_canary_samples(modification_id);
+CREATE INDEX IF NOT EXISTS idx_skill_canary_skill ON skill_canary_samples(skill_name);
+
 CREATE TABLE IF NOT EXISTS sentinels (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
