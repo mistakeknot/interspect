@@ -156,3 +156,29 @@ _interspect_approve_override "$AGENT"
 ```
 
 If "Cancel": do nothing.
+
+## Skill mode (`--source-kind=skill <skill>`)
+
+Promote a proposed `skill_tune` entry to active — this writes the overlay file and arms the canary.
+
+```bash
+SKILL="<skill>"   # e.g. clavain:work
+PENDING=$(_interspect_read_routing_overrides | jq -c --arg s "$SKILL" '.overrides[] | select(.kind=="skill_tune" and .skill==$s and .state=="proposed")')
+if [[ -z "$PENDING" ]]; then
+    echo "No pending skill_tune proposal for ${SKILL}. Run /interspect:propose --source-kind=skill."
+else
+    ACTION=$(echo "$PENDING" | jq -r '.action')
+    PATCH=$(echo "$PENDING" | jq -r '.patch')
+    EVIDENCE_IDS=$(echo "$PENDING" | jq -c '.evidence_ids // []')
+    # Safe-list still applies: body rewrites / availability are advisory-only and
+    # should be hand-applied to the SKILL.md, not auto-written as an overlay.
+    if _interspect_skill_action_is_auto "$ACTION"; then
+        _interspect_write_skill_overlay "$SKILL" "$ACTION" "$PATCH" "$EVIDENCE_IDS"
+    else
+        echo "Action '${ACTION}' is propose-only (safe-list). Apply the patch to ${SKILL}'s SKILL.md manually; the proposal stays recorded."
+    fi
+fi
+```
+
+Same-session self-approval guard applies as for agents (review by a different
+session is preferred). Report the overlay path, `modification_id`, and canary window.
