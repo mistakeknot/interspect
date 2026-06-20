@@ -137,6 +137,17 @@ Evidence and calibration data (C2) follow intermem's decay model:
 
 **Standard pattern:** Grace period → linear exclusion → no hysteresis needed (evidence is append-only, not demotable). Interspect uses a 90-day rolling window rather than per-entry decay because evidence is statistical — individual records don't go "stale," but old aggregate patterns lose relevance.
 
+## Signed Evidence (moat play — sylveste-ewy3.5.4)
+
+Interspect can emit **HMAC-signed action receipts** for routing-calibration events, turning its evidence trail into portable, third-party-verifiable proof. This is the "every action produces evidence" principle made cryptographic. See `docs/canon/signed-receipts-v1.md` for the receipt schema, canonicalization, and trust model.
+
+- **Opt-in**: set `INTERSPECT_SIGNED_RECEIPTS=1`. Off by default (zero overhead on the evidence hot path).
+- **Agent identity**: receipts are signed as `sylveste://agent/interspect#<rotation_epoch>`. The signing key self-provisions on first use under `.clavain/keys/receipts/` (canon §Key handling).
+- **Substrate**: `ic receipt emit` (sign + store), `ic receipt verify <id> | --since=<dur>` (verify, exit 0=valid/1=not-found/2=bad-sig/3=bad-schema/4=unknown-key), `ic receipt keygen` (rotate). Receipts live in the **intercore** DB (`action_receipts`, schema v35), not the interspect DB.
+- **Wired now**: routing-**override** applications (via `_interspect_emit_receipt` in `_interspect_insert_evidence`, fail-open). The emission is guarded so a signing failure never breaks evidence recording.
+- **Not yet wired** (follow-up): proposal and canary-evaluation paths are distinct code paths and are tracked separately. `/interspect:status` surfaces the current interspect signed-receipt count.
+- **Prerequisite**: the intercore DB must be migrated to schema v35 (`ic init` or normal migration). Without it, emission fails open (no receipt, no error).
+
 ## Known Constraints
 
 - `lib-interspect.sh` is 114KB — monolithic by necessity (all commands need the same DB/routing/canary functions)
