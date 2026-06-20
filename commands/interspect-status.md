@@ -42,6 +42,12 @@ TOTAL_EVIDENCE=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence;")
 OVERRIDE_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE event = 'override';")
 DISPATCH_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE event = 'agent_dispatch';")
 
+# Signed-receipt count (moat play — sylveste-ewy3.5.4). Receipts live in the
+# intercore DB (not the interspect DB); guard for absence — the feature is
+# opt-in (INTERSPECT_SIGNED_RECEIPTS=1) so the action_receipts table may not
+# exist. Verify integrity with `ic receipt verify --since=30d`.
+SIGNED_RECEIPTS=$(sqlite3 "${INTERCORE_DB:-.clavain/intercore.db}" "SELECT COUNT(*) FROM action_receipts WHERE agent_id LIKE 'sylveste://agent/interspect%';" 2>/dev/null || echo "0")
+
 # Top agents by evidence count
 TOP_AGENTS=$(sqlite3 -separator ' | ' "$DB" "SELECT source, COUNT(*) as cnt, COUNT(DISTINCT session_id) as sessions FROM evidence GROUP BY source ORDER BY cnt DESC LIMIT 10;")
 
