@@ -2944,6 +2944,13 @@ _interspect_insert_evidence() {
     local e_source_kind="${source_kind//\'/\'\'}"
 
     _interspect_sqlite_write "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason, quarantine_until, source_kind) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''), ${quarantine_until}, '${e_source_kind}');"
+
+    # Moat play (sylveste-ewy3.5.4): emit a signed receipt for routing-override
+    # applications. Opt-in + fail-open; proposal & canary paths are a separate
+    # follow-up (distinct code paths). Must never affect evidence recording.
+    if [[ "$event" == "override" ]]; then
+        _interspect_emit_receipt "$session_id" "$event" "${source}|${override_reason}" || true
+    fi
 }
 
 # ─── Session Source Classification (Calibration v2) ──────────────────────────

@@ -85,3 +85,32 @@ Additional display for global mode:
 - Add "Projects" column to per-agent table showing project count and list
 - Highlight agents appearing in >50% of projects with high override rates: "Consider global exclusion"
 - Show which projects each problematic agent appears in
+
+### 7. Skill Mode (`--source-kind=skill`)
+
+When `--source-kind=skill` is passed, report per-skill score deltas over time
+instead of agent override rates. Source: the `skills` block in
+`routing-calibration.json` plus snapshot history.
+
+```bash
+CAL="$(git rev-parse --show-toplevel)/.clavain/interspect/routing-calibration.json"
+HIST_DIR="$(dirname "$CAL")/calibration-history"
+# Current per-skill scores
+CURRENT=$(jq -c '[.skills[]? | {skill, score, invocations_30d, classified_from}]' "$CAL" 2>/dev/null || echo '[]')
+# Oldest snapshot in-window for the delta (reuse the agent snapshot machinery)
+PRIOR=$(ls -1 "$HIST_DIR"/*.json 2>/dev/null | sort | head -1)
+```
+
+Display a leaderboard:
+```
+Skill Calibration — Last ${WINDOW} days
+
+| Skill | Score | Δ vs prior | Invocations 30d | Classified | Per-signal (tok/err/no_redir/bead) |
+|-------|------:|-----------:|----------------:|------------|------------------------------------|
+{skills sorted by score ascending (worst first); Δ from PRIOR snapshot if present}
+```
+
+Recommendations:
+- Score < 0.5 with a degrading Δ: suggest `/interspect:tune --source-kind=skill <skill>`
+- Skill with an active overlay whose canary mean Δ is negative: warn it may auto-revert
+- All stable/improving: "Skill calibration is healthy"
