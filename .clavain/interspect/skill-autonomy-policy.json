@@ -1,0 +1,11 @@
+{
+  "_comment": "Per-action autonomy safe-list for interspect skill tuning (sylveste-7aj8.7). Layered ON TOP of the global autonomy switch in confidence.json: an action auto-applies only if global autonomy is on AND the action is listed in auto_apply. Edit to taste; defaults are baked into lib-interspect.sh if this file is absent.",
+  "auto_apply": [
+    "tighten_description",
+    "when_to_use_add"
+  ],
+  "propose_only": [
+    "skill_md_body_rewrite",
+    "availability"
+  ]
+}
