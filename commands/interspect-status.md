@@ -218,6 +218,47 @@ Present:
   "Overlays directory not initialized. Run any interspect command to create it."}
 ```
 
+## Skills (`--source-kind=skill`)
+
+When `--source-kind=skill` is passed (or always, as a compact extra section),
+show the skill-calibration state alongside agents:
+
+```bash
+# Skill tune entries (active / proposed / reverted)
+SKILL_ENTRIES=$(_interspect_read_routing_overrides | jq -r '.overrides[] | select(.kind=="skill_tune") | [.skill, .action, .state, (.modification_id // "—")] | @tsv')
+
+# Per-skill canary progress (active overlays only)
+SKILL_CANARIES=$(sqlite3 -separator ' | ' "$DB" "
+  SELECT s.skill_name, COUNT(DISTINCT s.invocation_id) AS samples,
+         ROUND(AVG(s.per_signal_delta), 3) AS mean_delta
+  FROM skill_canary_samples s
+  JOIN modifications m ON m.id = s.modification_id AND m.status = 'applied'
+  GROUP BY s.skill_name;")
+
+# Scored skills (if a calibration has been written)
+SKILL_SCORES=$( jq -r '.skills[]? | [.skill, .score, .invocations_30d, .classified_from] | @tsv' \
+  "$(git rev-parse --show-toplevel)/.clavain/interspect/routing-calibration.json" 2>/dev/null )
+```
+
+Present:
+```
+### Skills
+
+| Skill | Action | State | Mod | Canary samples | Mean Δ |
+|-------|--------|-------|-----|----------------|--------|
+{skill_tune rows joined with canary progress}
+
+| Skill | Score | Invocations 30d | Classified |
+|-------|------:|----------------:|------------|
+{scored skills, worst score first}
+
+{if no skill_tune entries and no scores:
+  "No skill calibration yet. Run `/interspect:calibrate` after skills accumulate ≥10 invocations."}
+```
+
+A skill whose mean Δ is strongly negative is regressing — the calibrate cycle
+will auto-revert it once it clears the >20%/signal AND >10%/composite trigger.
+
 ## Navigation
 
 ```
@@ -226,6 +267,7 @@ Run `/interspect:evidence <agent>` for detailed agent evidence.
 Run `/interspect:health` for signal diagnostics.
 Run `/interspect:propose` for routing override or overlay proposals.
 Run `/interspect:revert <agent>` to remove an override or disable overlays.
+Run `/interspect:status --source-kind=skill` for the skill-calibration view.
 ```
 
 ## Detailed View (agent name provided)
