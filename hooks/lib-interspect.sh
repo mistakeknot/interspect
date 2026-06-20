@@ -5327,7 +5327,9 @@ _interspect_skill_should_auto_apply() {
     _interspect_skill_action_is_auto "$action" || return 1
 
     # System breaker + global rate limit (shared with the agent/tool path).
-    if _interspect_system_breaker_check; then
+    # Redirect stdout: the breaker's sentinel write may echo the busy_timeout
+    # PRAGMA value, which would otherwise pollute this gate when called in $(...).
+    if _interspect_system_breaker_check >/dev/null; then
         echo "[interspect] System breaker tripped — skill auto-apply disabled." >&2
         return 1
     fi
