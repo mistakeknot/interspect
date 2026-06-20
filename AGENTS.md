@@ -119,6 +119,8 @@ When a routing override is applied, it enters a canary period:
 | Intercore | Dual-read from `interspect_events` kernel table via `ic interspect query`; kernel events consumed at session start |
 | flux-drive agents | The subjects being profiled; routing overrides target flux-drive agent IDs |
 | interpulse | interpulse monitors context pressure; interspect monitors routing quality (complementary) |
+| tool-time | **Boundary:** tool-time continues to own `~/.claude/tool-time/events.jsonl` for its community-comparison flows. Interspect reads only `~/.claude/audit.log` (the `tool:"Skill"` rows) for skill calibration — it never reads or writes tool-time's event log. The two share no storage. |
+| skills (Skill loader) | The subjects of skill calibration; skill overlays at `~/.claude/skill-overlays/` are merged over source SKILL.md by the loader |
 
 ## Testing
 
