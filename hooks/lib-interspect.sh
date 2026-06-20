@@ -1987,7 +1987,7 @@ _interspect_reset() {
             echo "Reset: evidence table cleared."
             ;;
         canary)
-            sqlite3 "$db" "DELETE FROM canary; DELETE FROM canary_samples;" 2>/dev/null || return 1
+            sqlite3 "$db" "DELETE FROM canary; DELETE FROM canary_samples; DELETE FROM skill_canary_samples;" 2>/dev/null || return 1
             echo "Reset: canary tables cleared."
             ;;
         modifications)
@@ -1995,7 +1995,7 @@ _interspect_reset() {
             echo "Reset: modifications table cleared."
             ;;
         all)
-            sqlite3 "$db" "DELETE FROM evidence; DELETE FROM canary; DELETE FROM canary_samples; DELETE FROM modifications;" 2>/dev/null || return 1
+            sqlite3 "$db" "DELETE FROM evidence; DELETE FROM canary; DELETE FROM canary_samples; DELETE FROM skill_canary_samples; DELETE FROM modifications;" 2>/dev/null || return 1
             echo "Reset: all interspect data cleared (evidence, canary, modifications)."
             echo "Preserved: sessions table, confidence.json, routing-overrides.json."
             ;;
