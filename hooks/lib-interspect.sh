@@ -5363,9 +5363,11 @@ _interspect_record_skill_canary_sample() {
     e_sig=$(_interspect_sql_escape "$signal_kind")
     local delta; delta=$(awk -v c="$value" -v b="${baseline:-0}" 'BEGIN{printf "%.6f", c-b}')
     local base_sql="${baseline:-NULL}"; [[ -z "$baseline" ]] && base_sql="NULL"
+    # Redirect stdout: _interspect_sqlite_write may echo the busy_timeout PRAGMA
+    # value; this is a write, so nothing on stdout is meaningful to callers.
     _interspect_sqlite_write "$db" "INSERT OR IGNORE INTO skill_canary_samples
         (modification_id, skill_name, invocation_id, signal_kind, baseline_value, canary_value, per_signal_delta, observed_at)
-        VALUES (${mod_id}, '${e_skill}', '${e_inv}', '${e_sig}', ${base_sql}, ${value}, ${delta}, '${ts}');"
+        VALUES (${mod_id}, '${e_skill}', '${e_inv}', '${e_sig}', ${base_sql}, ${value}, ${delta}, '${ts}');" >/dev/null
 }
 
 # Evaluate a skill canary. Regression trigger (plan Task 7 Step 2): ANY individual
