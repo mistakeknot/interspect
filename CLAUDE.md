@@ -27,3 +27,4 @@ python3 -c "import json; json.load(open('hooks/hooks.json'))"           # Hooks 
 - Canary monitoring: 20-use window over 14 days, 20% alert threshold
 - Protected paths enforced via `.clavain/interspect/protected-paths.json`
 - Discovery via clavain lib.sh `_discover_interspect_plugin()` looking for `hooks/lib-interspect.sh`
+- **Skill calibration (sylveste-7aj8):** the routing loop also covers skills via `source_kind='skill'`. Evidence drains from `~/.claude/audit.log` only (tool-time keeps its own `events.jsonl` — no shared storage). Skill overlays live in `~/.claude/skill-overlays/<plugin>:<skill>.md`; per-action autonomy safe-list in `.clavain/interspect/skill-autonomy-policy.json` (`tighten_description`/`when_to_use_add` auto-apply; body rewrites/availability propose-only). Skill canaries use the `skill_canary_samples` table, NOT the agent-shaped `canary_samples`.
