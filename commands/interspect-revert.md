@@ -1,7 +1,7 @@
 ---
 name: interspect-revert
 description: Revert a routing override (agent), an agent overlay, or a tool remediation
-argument-hint: "<agent-name> | tool:<source> | <commit-sha>"
+argument-hint: "<agent-name> | tool:<source> | --source-kind=skill <skill> | <commit-sha>"
 ---
 
 # Interspect Revert
