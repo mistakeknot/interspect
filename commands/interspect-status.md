@@ -82,6 +82,7 @@ Present as:
 - Total events: {total_evidence}
 - Overrides (corrections): {override_count}
 - Agent dispatches: {dispatch_count}
+- Signed receipts: {signed_receipts} (verify: `ic receipt verify --since=30d`)
 
 ### Top Agents by Evidence
 | Agent | Events | Sessions |
