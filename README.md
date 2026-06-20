@@ -31,6 +31,11 @@ claude plugin update interspect@interagency-marketplace
 /interspect:enable-autonomy   # Enable autonomous mode
 /interspect:disable-autonomy  # Disable autonomous mode
 /interspect:unblock      # Unblock stalled modification
+
+# Skill calibration (add --source-kind=skill to most commands)
+/interspect:tune --source-kind=skill <plugin>:<skill>   # Generate a skill overlay
+/interspect:status --source-kind=skill                  # Skill calibration view
+/interspect:health --source-kind=skill                  # Skill signal coverage
 ```
 
 ## How It Works
