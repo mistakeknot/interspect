@@ -2855,6 +2855,25 @@ _interspect_validate_hook_id() {
 # Args: $1=session_id $2=source $3=event $4=override_reason $5=context_json $6=hook_id
 #       $7=source_event_id (optional) $8=source_table (optional) $9=raw_override_reason (optional)
 #       $10=source_kind (optional, default 'agent'; one of: agent | tool | pattern | skill)
+# Emit a signed action receipt for a routing-calibration event (moat play —
+# sylveste-ewy3.5.4). Opt-in via INTERSPECT_SIGNED_RECEIPTS=1; fail-open so a
+# signing failure never breaks evidence recording. Shells out to `ic receipt
+# emit`, which HMAC-signs the event, self-provisions the per-agent key on first
+# use, and stores the receipt in the intercore DB. Verify with
+# `ic receipt verify --since=<dur>`. Requires the intercore DB migrated to
+# schema v35 (action_receipts). See docs/canon/signed-receipts-v1.md.
+# Args: $1=session_id  $2=event  $3=content_payload
+_interspect_emit_receipt() {
+    [[ "${INTERSPECT_SIGNED_RECEIPTS:-0}" == "1" ]] || return 0
+    command -v ic >/dev/null 2>&1 || return 0
+    ic receipt emit \
+        --agent="sylveste://agent/interspect" \
+        --model="${INTERSPECT_RECEIPT_MODEL:-none}" \
+        --content="interspect:${2}:${3}" \
+        --parent-run="${1}" \
+        >/dev/null 2>&1 || true
+}
+
 _interspect_insert_evidence() {
     local session_id="$1"
     local source="$2"
