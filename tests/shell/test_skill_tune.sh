@@ -16,6 +16,10 @@
 
 set -eo pipefail
 
+# Resolve the repo root BEFORE any cd (BASH_SOURCE is relative when invoked as
+# `bash tests/shell/test_skill_tune.sh`).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 TEST_DIR=$(mktemp -d)
 trap 'cd /; rm -rf "$TEST_DIR"' EXIT
 
