@@ -1,7 +1,7 @@
 {
   "name": "interspect",
-  "version": "0.1.20",
-  "description": "Agent performance profiler and routing optimizer. Collects evidence about flux-drive agent accuracy, proposes routing overrides for underperforming agents, and monitors canary periods. Companion plugin for Clavain.",
+  "version": "0.1.21",
+  "description": "Agent and skill performance profiler and routing optimizer. Collects evidence about flux-drive agent accuracy and skill quality, proposes routing overrides and skill overlays for underperformers, and monitors canary periods. Companion plugin for Clavain.",
   "author": {
     "name": "mistakeknot"
   },
