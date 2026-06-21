@@ -228,9 +228,191 @@ assert_eq "dry-run leaves no calibration file" \
 
 echo ""
 echo "=== --min-invocations override lets B in ==="
-OUT=$(python3 "$SCORE" --db "$DB" --min-invocations 9 --half-life-days 100000 --json 2>/dev/null)
+OUT=$(python3 "$SCORE" --db "$DB" --min-invocations 9 --half-life-days 100000 --static-weights --json 2>/dev/null)
 B_IN=$(echo "$OUT" | python3 -c "import json,sys;print('beta:thin' in json.load(sys.stdin)['skills'])")
 assert_eq "--min-invocations 9 admits skill B" "$B_IN" "True"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VARIANCE-AWARE SIGNAL WEIGHTING (sylveste-ysny)
+# A fresh scratch DB / cohort so the variance math is isolated from skills A–E.
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== variance-aware: saturated error down-weighted, no_redirect drives score ==="
+VDIR=$(mktemp -d)
+export CLAUDE_PROJECT_DIR="$VDIR"
+mkdir -p "$VDIR/.clavain/interspect"
+( cd "$VDIR" && _interspect_ensure_db )
+VDB="$VDIR/.clavain/interspect/interspect.db"
+
+vseed_evidence() { # <inv> <skill> <ts>
+    sqlite3 "$VDB" "INSERT INTO evidence
+        (ts, session_id, seq, source, event, context, project, source_event_id,
+         source_table, quarantine_until, source_kind)
+        VALUES ('$3', 'sess-$1', 1, '$2', 'skill_invocation', '{}',
+                '$VDIR', '$1', 'skill_signals', 0, 'skill');"
+}
+vseed_signal() { # <skill> <inv> <kind> <val> <ts>
+    sqlite3 "$VDB" "INSERT OR IGNORE INTO skill_signals
+        (skill_name, session_id, invocation_id, signal_kind, value, raw_value, observed_at)
+        VALUES ('$1', 'sess-$2', '$2', '$3', $4, $4, '$5');"
+}
+
+# Cohort P/Q/R — 11 invocations each (clears default >=10). All four signals
+# present on every skill. error=1.0 everywhere (SATURATED). tokens=0.5,
+# bead_close=0.5 everywhere (also saturated). no_redirect VARIES: P=0.9,Q=0.5,R=0.1.
+# No skill_goals rows -> uniform {1/3,1/3,1/3}.
+#
+# Hand-computed (variance-aware default):
+#   info weights: tokens=0, error=0 (saturated), no_redirect=1.0, bead_close=0.
+#   precision: error eff=1.0*0=0, no_redirect eff=0.5*1.0=0.5 -> precision = no_redirect.
+#   speed: tokens eff=0 -> ALL saturated -> static fallback -> 0.5.
+#   completeness: bead_close eff=0 -> static fallback -> 0.5.
+#   composite = (0.5 + no_redirect + 0.5)/3:
+#     P=(0.5+0.9+0.5)/3=0.633333  Q=0.5  R=(0.5+0.1+0.5)/3=0.366667
+declare -A VNR=( [pp:sat]=0.9 [qq:sat]=0.5 [rr:sat]=0.1 )
+for sk in pp:sat qq:sat rr:sat; do
+    nr=${VNR[$sk]}
+    for i in $(seq 1 11); do
+        inv="${sk//:/_}-$i"
+        vseed_evidence "$inv" "$sk" "$TS_RECENT"
+        vseed_signal "$sk" "$inv" tokens 0.5 "$TS_RECENT"
+        vseed_signal "$sk" "$inv" error 1.0 "$TS_RECENT"
+        vseed_signal "$sk" "$inv" no_redirect "$nr" "$TS_RECENT"
+        vseed_signal "$sk" "$inv" bead_close 0.5 "$TS_RECENT"
+    done
+done
+
+VOUT=$(python3 "$SCORE" --db "$VDB" --half-life-days 100000 --json 2>/dev/null)
+
+# error info weight ≈ 0 (saturated)
+ERR_IW=$(echo "$VOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['signal_info_weights']['error'],4))")
+assert_eq "variance: error info weight == 0 (saturated)" "$ERR_IW" "0.0"
+# tokens + bead_close also saturated -> 0
+TOK_IW=$(echo "$VOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['signal_info_weights']['tokens'],4))")
+assert_eq "variance: tokens info weight == 0 (saturated)" "$TOK_IW" "0.0"
+BEAD_IW=$(echo "$VOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['signal_info_weights']['bead_close'],4))")
+assert_eq "variance: bead_close info weight == 0 (saturated)" "$BEAD_IW" "0.0"
+# no_redirect genuinely varies (stddev 0.327 >= ref 0.15) -> full weight 1.0
+NR_IW=$(echo "$VOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['signal_info_weights']['no_redirect'],4))")
+assert_eq "variance: no_redirect info weight == 1.0 (varies)" "$NR_IW" "1.0"
+
+# precision goal == the no_redirect value (error contributes ~nothing)
+P_PREC=$(echo "$VOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['skills']['pp:sat']['goals']['precision'],4))")
+assert_eq "variance: P precision == no_redirect 0.9" "$P_PREC" "0.9"
+R_PREC=$(echo "$VOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['skills']['rr:sat']['goals']['precision'],4))")
+assert_eq "variance: R precision == no_redirect 0.1" "$R_PREC" "0.1"
+
+# Hand-computed composite for P == 0.633333
+P_SCORE=$(echo "$VOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['skills']['pp:sat']['score'],6))")
+assert_eq "variance: P composite == 0.633333" "$P_SCORE" "0.633333"
+R_SCORE=$(echo "$VOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['skills']['rr:sat']['score'],6))")
+assert_eq "variance: R composite == 0.366667" "$R_SCORE" "0.366667"
+
+# Ordering driven by no_redirect (NOT flattened): P > Q > R
+VORDER=$(echo "$VOUT" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)['skills']
+print(' '.join(k for k,_ in sorted(d.items(), key=lambda kv:(-kv[1]['score'], kv[0]))))
+")
+assert_eq "variance: order P>Q>R (no_redirect drives it)" "$VORDER" "pp:sat qq:sat rr:sat"
+
+echo ""
+echo "=== --static-weights reproduces the OLD (flattened) composite ==="
+# Same cohort, static weights: error pins precision near 1.0 and COMPRESSES spread.
+#   static precision = (1.0*1.0 + 0.5*nr)/1.5
+#     P=(1+0.45)/1.5=0.96667  R=(1+0.05)/1.5=0.7
+#   static composite = (0.5 + precision + 0.5)/3:
+#     P=(0.5+0.96667+0.5)/3=0.655556  R=(0.5+0.7+0.5)/3=0.566667
+SOUT=$(python3 "$SCORE" --db "$VDB" --half-life-days 100000 --static-weights --json 2>/dev/null)
+SP_SCORE=$(echo "$SOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['skills']['pp:sat']['score'],6))")
+assert_eq "static: P composite == 0.655556 (legacy)" "$SP_SCORE" "0.655556"
+SR_SCORE=$(echo "$SOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['skills']['rr:sat']['score'],6))")
+assert_eq "static: R composite == 0.566667 (legacy)" "$SR_SCORE" "0.566667"
+# static mode reports empty info weights + variance_aware=false
+SVA=$(echo "$SOUT" | python3 -c "import json,sys;print(json.load(sys.stdin)['variance_aware'])")
+assert_eq "static: variance_aware flag is False" "$SVA" "False"
+SIW=$(echo "$SOUT" | python3 -c "import json,sys;print(len(json.load(sys.stdin)['signal_info_weights']))")
+assert_eq "static: signal_info_weights empty" "$SIW" "0"
+# variance-aware MUST separate P from R MORE than static does (the payoff)
+VSPREAD=$(python3 -c "print(round($P_SCORE - $R_SCORE,6))")
+SSPREAD=$(python3 -c "print(round($SP_SCORE - $SR_SCORE,6))")
+WIDER=$(python3 -c "print($VSPREAD > $SSPREAD)")
+assert_eq "variance spread ($VSPREAD) > static spread ($SSPREAD)" "$WIDER" "True"
+
+echo ""
+echo "=== variance: a genuinely-varying signal keeps meaningful weight ==="
+# Build a cohort where tokens ALSO varies (0.9/0.5/0.1) -> it must keep weight,
+# proving the mechanism is not specific to no_redirect.
+TDIR=$(mktemp -d)
+export CLAUDE_PROJECT_DIR="$TDIR"
+mkdir -p "$TDIR/.clavain/interspect"
+( cd "$TDIR" && _interspect_ensure_db )
+TDB="$TDIR/.clavain/interspect/interspect.db"
+tseed_ev() { sqlite3 "$TDB" "INSERT INTO evidence
+    (ts, session_id, seq, source, event, context, project, source_event_id,
+     source_table, quarantine_until, source_kind)
+    VALUES ('$3','sess-$1',1,'$2','skill_invocation','{}','$TDIR','$1',
+            'skill_signals',0,'skill');"; }
+tseed_sig() { sqlite3 "$TDB" "INSERT OR IGNORE INTO skill_signals
+    (skill_name, session_id, invocation_id, signal_kind, value, raw_value, observed_at)
+    VALUES ('$1','sess-$2','$2','$3',$4,$4,'$5');"; }
+declare -A TTOK=( [t1:v]=0.9 [t2:v]=0.5 [t3:v]=0.1 )
+for sk in t1:v t2:v t3:v; do
+    tv=${TTOK[$sk]}
+    for i in $(seq 1 11); do
+        inv="${sk//:/_}-$i"
+        tseed_ev "$inv" "$sk" "$TS_RECENT"
+        tseed_sig "$sk" "$inv" tokens "$tv" "$TS_RECENT"
+        tseed_sig "$sk" "$inv" error 1.0 "$TS_RECENT"   # saturated
+    done
+done
+TOUT=$(python3 "$SCORE" --db "$TDB" --half-life-days 100000 --json 2>/dev/null)
+T_TOK_IW=$(echo "$TOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['signal_info_weights']['tokens'],4))")
+assert_eq "variance: varying tokens keeps full weight 1.0" "$T_TOK_IW" "1.0"
+T_ERR_IW=$(echo "$TOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['signal_info_weights']['error'],4))")
+assert_eq "variance: error still 0 in tokens cohort" "$T_ERR_IW" "0.0"
+rm -rf "$TDIR"
+
+echo ""
+echo "=== single-skill cohort falls back to static (no divide-by-zero) ==="
+# One qualifying skill -> dispersion uncomputable -> static-weight fallback.
+ODIR=$(mktemp -d)
+export CLAUDE_PROJECT_DIR="$ODIR"
+mkdir -p "$ODIR/.clavain/interspect"
+( cd "$ODIR" && _interspect_ensure_db )
+ODB="$ODIR/.clavain/interspect/interspect.db"
+oseed_ev() { sqlite3 "$ODB" "INSERT INTO evidence
+    (ts, session_id, seq, source, event, context, project, source_event_id,
+     source_table, quarantine_until, source_kind)
+    VALUES ('$3','sess-$1',1,'$2','skill_invocation','{}','$ODIR','$1',
+            'skill_signals',0,'skill');"; }
+oseed_sig() { sqlite3 "$ODB" "INSERT OR IGNORE INTO skill_signals
+    (skill_name, session_id, invocation_id, signal_kind, value, raw_value, observed_at)
+    VALUES ('$1','sess-$2','$2','$3',$4,$4,'$5');"; }
+# Single skill, full case identical to legacy Skill A (tokens .8/error 1/nr .6/bead .5),
+# goals {speed .2, precision .6, completeness .2} -> legacy composite 0.78.
+for i in $(seq 1 12); do
+    oseed_ev "o-$i" "solo:one" "$TS_RECENT"
+    oseed_sig "solo:one" "o-$i" tokens 0.8 "$TS_RECENT"
+    oseed_sig "solo:one" "o-$i" error 1.0 "$TS_RECENT"
+    oseed_sig "solo:one" "o-$i" no_redirect 0.6 "$TS_RECENT"
+    oseed_sig "solo:one" "o-$i" bead_close 0.5 "$TS_RECENT"
+done
+sqlite3 "$ODB" "INSERT OR REPLACE INTO skill_goals
+    (skill_name, goal_weights, classified_from, classifier_version, classified_at)
+    VALUES ('solo:one', json_object('speed',0.2,'precision',0.6,'completeness',0.2),
+            'skill_md','test-v1','$TS_NOW');"
+# Default (variance-aware) run must NOT crash and must equal the static result
+# (single-skill fallback). Expect composite 0.78 with error at full weight.
+OOUT=$(python3 "$SCORE" --db "$ODB" --half-life-days 100000 --json 2>"$ODIR/oerr.txt")
+O_RC=$?
+assert_eq "single-skill run exits 0 (no divide-by-zero)" "$O_RC" "0"
+O_SCORE=$(echo "$OOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['skills']['solo:one']['score'],4))")
+assert_eq "single-skill score == 0.78 (static fallback)" "$O_SCORE" "0.78"
+O_PREC=$(echo "$OOUT" | python3 -c "import json,sys;print(round(json.load(sys.stdin)['skills']['solo:one']['goals']['precision'],4))")
+assert_eq "single-skill precision == 0.8667 (static fallback)" "$O_PREC" "0.8667"
+rm -rf "$ODIR"
+rm -rf "$VDIR"
 
 echo ""
 echo "─────────────────────────"
