@@ -711,6 +711,8 @@ def main() -> int:
             window_days=args.window_days,
             min_invocations=args.min_invocations,
             half_life_days=args.half_life_days,
+            signal_info_weights=signal_info_weights,
+            static_weights=args.static_weights,
         )
         print(f"score-skills: wrote skills block → {calibration_path}", file=sys.stderr)
     else:
@@ -725,6 +727,10 @@ def main() -> int:
                     "window_days": args.window_days,
                     "min_invocations": args.min_invocations,
                     "half_life_days": args.half_life_days,
+                    "variance_aware": not args.static_weights,
+                    "signal_info_weights": {
+                        k: round(v, 4) for k, v in sorted(signal_info_weights.items())
+                    },
                     "skills": _skills_block(scores),
                 },
                 indent=2,
@@ -733,7 +739,12 @@ def main() -> int:
         )
     else:
         print(file=sys.stderr)
-        print_leaderboard(scores, stream=sys.stderr)
+        print_leaderboard(
+            scores,
+            signal_info_weights=signal_info_weights,
+            static_weights=args.static_weights,
+            stream=sys.stderr,
+        )
 
     return 0
 
