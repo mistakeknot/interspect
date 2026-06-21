@@ -69,7 +69,8 @@ pass a very large half-life to recover a plain unweighted mean.
 CLI
 ───
   score-skills.py [--db PATH] [--window-days 30] [--min-invocations 10]
-                  [--half-life-days 14] [--dry-run] [--json] [--repo-root .]
+                  [--half-life-days 14] [--static-weights] [--dry-run] [--json]
+                  [--repo-root .]
 
 Exit 0 always on success (this is a calibration writer, not a gate).
 """
