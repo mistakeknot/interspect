@@ -684,12 +684,13 @@ def main() -> int:
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA busy_timeout=5000;")
     try:
-        scores = score_skills(
+        scores, signal_info_weights = score_skills(
             conn,
             now=now,
             window_days=args.window_days,
             min_invocations=args.min_invocations,
             half_life_days=args.half_life_days,
+            static_weights=args.static_weights,
         )
     finally:
         conn.close()
