@@ -599,11 +599,26 @@ def write_calibration(
 # ─── Human leaderboard ───────────────────────────────────────────────────────
 
 
-def print_leaderboard(scores: list[SkillScore], *, stream=sys.stdout) -> None:
+def print_leaderboard(
+    scores: list[SkillScore],
+    *,
+    signal_info_weights: dict[str, float] | None = None,
+    static_weights: bool = False,
+    stream=sys.stdout,
+) -> None:
     if not scores:
         print("(no qualifying skills)", file=stream)
         return
     sig_order = ("tokens", "error", "no_redirect", "bead_close")
+    # Header: surface the cohort information weights so the down-weighting of a
+    # saturated signal is auditable right next to the leaderboard.
+    if static_weights:
+        print("signal info weights: [static-weights] variance adjustment OFF", file=stream)
+    elif signal_info_weights is not None:
+        iw = "  ".join(
+            f"{k}={signal_info_weights.get(k, 0.0):.3f}" for k in sig_order
+        )
+        print(f"signal info weights: {iw}", file=stream)
     print(
         f"{'#':>3}  {'score':>6}  {'inv':>4}  {'src':<10}  "
         f"{'tokens':>7} {'error':>7} {'no_red':>7} {'bead':>7}  skill",
@@ -619,7 +634,6 @@ def print_leaderboard(scores: list[SkillScore], *, stream=sys.stdout) -> None:
             f"{cell('bead_close'):>7}  {s.skill}",
             file=stream,
         )
-    _ = sig_order
 
 
 # ─── Main ────────────────────────────────────────────────────────────────────
