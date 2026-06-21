@@ -449,14 +449,47 @@ def score_skills(
     window_days: int,
     min_invocations: int,
     half_life_days: float,
-) -> list[SkillScore]:
+    static_weights: bool = False,
+) -> tuple[list[SkillScore], dict[str, float]]:
+    """Score qualifying skills; return (scores, signal_info_weights).
+
+    TWO-PASS (variance-aware). Pass 1 collects every qualifying skill's per-signal
+    aggregates + goal weights. Pass 2 computes the cohort-level information weight
+    per signal_kind (population stddev of its values across skills → [0,1]) and
+    folds it into the signal→goal aggregation, so a saturated signal contributes
+    ~nothing to its goal.
+
+    FALLBACKS:
+      * ``static_weights=True``  → skip variance adjustment entirely; reproduce the
+        original static-weight composite (info_weights = {} reported, info_used=False).
+      * fewer than 2 scored skills → no dispersion is computable (stddev needs >=2
+        points), so fall back to static weights to avoid zeroing every signal.
+    """
     lower_bound = window_lower_bound(now, window_days)
-    out: list[SkillScore] = []
+
+    # Pass 1: collect per-skill aggregates + metadata.
+    collected: list[tuple[str, int, dict[str, float], dict[str, float], str, str]] = []
     for skill_name, n_inv in qualifying_skills(conn, lower_bound, min_invocations):
         rows = signal_rows(conn, skill_name, lower_bound)
         signal_aggs = aggregate_signals(rows, now, half_life_days)
-        goal_values = signals_to_goals(signal_aggs)
         weights, goal_source, classified_from = load_goal_weights(conn, skill_name)
+        collected.append(
+            (skill_name, n_inv, signal_aggs, weights, goal_source, classified_from)
+        )
+
+    # Decide whether variance-aware weighting applies.
+    per_skill_aggs = [c[2] for c in collected]
+    use_info = (not static_weights) and len(collected) >= 2
+    if use_info:
+        info_weights = compute_signal_info_weights(per_skill_aggs)
+    else:
+        info_weights = {}
+    info_arg = info_weights if use_info else None
+
+    # Pass 2: score with (or without) the cohort info weights.
+    out: list[SkillScore] = []
+    for skill_name, n_inv, signal_aggs, weights, goal_source, classified_from in collected:
+        goal_values = signals_to_goals(signal_aggs, info_arg)
         score = composite_score(goal_values, weights)
         out.append(
             SkillScore(
@@ -471,7 +504,7 @@ def score_skills(
             )
         )
     out.sort(key=lambda s: (-s.score, s.skill))
-    return out
+    return out, info_weights
 
 
 # ─── Calibration JSON write (+ snapshot history) ─────────────────────────────
