@@ -349,26 +349,64 @@ def aggregate_signals(
     return agg
 
 
-def signals_to_goals(signal_aggs: dict[str, float]) -> dict[str, float]:
+def effective_signal_weight(
+    kind: str, structural_weight: float, info_weights: dict[str, float] | None
+) -> float:
+    """Per-signal effective weight = structural * info_weight.
+
+    When ``info_weights`` is None (static mode, or single-skill fallback) the
+    effective weight is just the structural SIGNAL_GOAL weight (old behavior). A
+    signal_kind absent from ``info_weights`` (present for this skill but with no
+    cohort dispersion computed) also falls back to its structural weight.
+    """
+    if info_weights is None:
+        return structural_weight
+    iw = info_weights.get(kind)
+    if iw is None:
+        return structural_weight
+    return structural_weight * iw
+
+
+def signals_to_goals(
+    signal_aggs: dict[str, float],
+    info_weights: dict[str, float] | None = None,
+) -> dict[str, float]:
     """Map per-signal aggregates → per-goal values via SIGNAL_GOAL.
 
     Each goal value = weighted mean of its mapped signals THAT ARE PRESENT
     (missing signals drop out). Goals with no present signal are omitted (the
     composite renormalizes over present goals).
+
+    When ``info_weights`` is provided (variance-aware mode), each mapped signal's
+    structural SIGNAL_GOAL weight is multiplied by that signal's cohort
+    information weight, so a saturated signal (info weight ~0) contributes ~nothing
+    to its goal and the surviving signal dominates.
+
+    SATURATION FALLBACK. If EVERY signal mapped into a goal is saturated (their
+    info-weighted weights all sum to ~0), the goal would be undefined under the
+    variance-aware weights. We then fall back to the STATIC (structural-only)
+    weighted mean for that goal so it stays defined — better a saturated value
+    than a dropped goal.
     """
-    by_goal: dict[str, list[tuple[float, float]]] = {}
+    by_goal: dict[str, list[tuple[float, float, float]]] = {}  # (eff_w, static_w, value)
     for kind, value in signal_aggs.items():
         mapping = SIGNAL_GOAL.get(kind)
         if mapping is None:
             continue
-        goal, weight = mapping
-        by_goal.setdefault(goal, []).append((weight, value))
+        goal, structural_weight = mapping
+        eff_w = effective_signal_weight(kind, structural_weight, info_weights)
+        by_goal.setdefault(goal, []).append((eff_w, structural_weight, value))
     goals: dict[str, float] = {}
-    for goal, wv in by_goal.items():
-        wsum = sum(w for w, _ in wv)
-        if wsum <= 0:
+    for goal, items in by_goal.items():
+        eff_sum = sum(ew for ew, _, _ in items)
+        if eff_sum > 0:
+            goals[goal] = sum(ew * v for ew, _, v in items) / eff_sum
             continue
-        goals[goal] = sum(w * v for w, v in wv) / wsum
+        # Every mapped signal is saturated (info weight ~0) → fall back to the
+        # static structural-weighted mean so the goal does not go undefined.
+        static_sum = sum(sw for _, sw, _ in items)
+        if static_sum > 0:
+            goals[goal] = sum(sw * v for _, sw, v in items) / static_sum
     return goals
 
 
