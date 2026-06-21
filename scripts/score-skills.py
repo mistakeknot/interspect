@@ -107,6 +107,99 @@ SIGNAL_GOAL: dict[str, tuple[str, float]] = {
 GOAL_KEYS = ("speed", "precision", "completeness")
 UNIFORM_WEIGHTS = {k: 1.0 / 3.0 for k in GOAL_KEYS}
 
+# ─── Variance-aware signal weighting (sylveste-ysny) ─────────────────────────
+#
+# PROBLEM. A signal that is STRUCTURALLY SATURATED (identical for ~every skill)
+# carries no information yet still pulls its mapped goal toward a constant. The
+# `error` signal is the canonical case: the PostToolUse telemetry has no real
+# failure data (exit_code is always 0), so `error` aggregates to ~1.0 for every
+# skill. At full weight it pins `precision` near 1.0 for everyone and flattens
+# the composite, drowning out `no_redirect` — the one precision signal with real
+# behavioral variance.
+#
+# FIX. Scale each signal_kind's contribution by how much it actually VARIES
+# across the scored cohort. We measure dispersion as the POPULATION standard
+# deviation of a signal's per-skill aggregate values, then map it to an
+# "information weight" in [0,1]:
+#
+#     info_weight(sigma) = clamp(sigma / DISPERSION_REF, 0, 1)
+#
+# A linear ramp (not exp) was chosen for auditability — the weight reads off as
+# "this signal's spread relative to a reference spread". DISPERSION_REF is the
+# stddev at which a signal earns FULL weight; below DISPERSION_EPS the signal is
+# treated as fully saturated and gets weight 0 (the eps guards float noise so a
+# signal that is *exactly* constant, or constant to ~1e-6, scores 0 rather than a
+# tiny non-zero ramp value).
+#
+# REFERENCE CHOICE. Signal aggregates live in [0,1]. A signal split evenly
+# between 0 and 1 across the cohort has population stddev 0.5 (the maximum for a
+# two-point [0,1] distribution); a signal uniformly spread over [0,1] has stddev
+# ~0.29. DISPERSION_REF = 0.15 means a signal needs a stddev of ~0.15 (a
+# moderate, clearly-non-saturated spread — e.g. values ranging ~0.3 wide) to earn
+# full weight, and partial weight ramps linearly below that. This keeps a
+# genuinely-varying signal at or near full weight while crushing a saturated one
+# to ~0.
+#
+# The information weight is a SEPARATE multiplicative factor folded on top of the
+# existing structural SIGNAL_GOAL weights (e.g. no_redirect keeps its 0.5x
+# structural de-weight; its EFFECTIVE weight inside precision becomes
+# 0.5 * info_weight(no_redirect)). See effective_signal_weight().
+DISPERSION_REF = 0.15  # stddev at which a signal earns full information weight
+DISPERSION_EPS = 1e-6  # below this stddev a signal is "saturated" → weight 0
+
+
+def population_stddev(values: list[float]) -> float:
+    """Population standard deviation of a non-empty value list (0.0 if <2)."""
+    n = len(values)
+    if n < 2:
+        return 0.0
+    mean = sum(values) / n
+    var = sum((v - mean) ** 2 for v in values) / n
+    return math.sqrt(var)
+
+
+def info_weight_from_dispersion(sigma: float) -> float:
+    """Map a per-signal dispersion (stddev) to an information weight in [0,1].
+
+    ``clamp(sigma / DISPERSION_REF, 0, 1)`` with a hard 0 below DISPERSION_EPS
+    (so an exactly/near-constant signal contributes nothing). A signal with
+    dispersion >= DISPERSION_REF earns full weight 1.0.
+    """
+    if sigma < DISPERSION_EPS:
+        return 0.0
+    w = sigma / DISPERSION_REF
+    if w < 0.0:
+        return 0.0
+    if w > 1.0:
+        return 1.0
+    return w
+
+
+def compute_signal_info_weights(
+    per_skill_aggs: list[dict[str, float]],
+) -> dict[str, float]:
+    """Cohort-level information weight per signal_kind, in [0,1].
+
+    ``per_skill_aggs`` is one signal-aggregate dict per scored skill. For each
+    signal_kind we collect its value across the skills THAT HAVE IT (a signal
+    present for only some skills disperses over the skills that have it), compute
+    the population stddev, and map it through info_weight_from_dispersion.
+
+    FALLBACK (single scored skill / <2 values for a kind): population_stddev
+    returns 0.0 → info weight 0.0, which would zero out every signal. The CALLER
+    detects the "no dispersion computable" case (a cohort with fewer than 2
+    skills) and uses static weights instead; this function never divides by zero.
+    """
+    by_kind: dict[str, list[float]] = {}
+    for aggs in per_skill_aggs:
+        for kind, value in aggs.items():
+            by_kind.setdefault(kind, []).append(value)
+    return {
+        kind: info_weight_from_dispersion(population_stddev(vals))
+        for kind, vals in by_kind.items()
+    }
+
+
 # Schema version for routing-calibration.json. Agent writer
 # (_interspect_write_routing_calibration) emits 2; this adds the `skills`
 # block additively, so we bump to 3. Downstream consumers ignore unknown fields.
