@@ -31,11 +31,22 @@ Algorithm
    ``skill_signals.value`` over the window (see RECENCY DECAY below). Each
    aggregate is already in [0,1] because collectors normalize to [0,1].
 3. Signal → goal mapping (matches infer-skill-goals.SIGNAL_GOAL_MAP):
-       tokens      → speed         (weight 1.0)
-       error       → precision     (weight 1.0)
-       no_redirect → precision     (weight 0.5, so it doesn't double-count error)
-       bead_close  → completeness  (weight 1.0)
-   Per-goal value = weighted mean of its mapped signals that are PRESENT
+       tokens      → speed         (structural weight 1.0)
+       error       → precision     (structural weight 1.0)
+       no_redirect → precision     (structural weight 0.5, so it doesn't double-count error)
+       bead_close  → completeness  (structural weight 1.0)
+   VARIANCE-AWARE WEIGHTING (sylveste-ysny, default on): each signal_kind's
+   structural weight is multiplied by a cohort INFORMATION WEIGHT in [0,1] derived
+   from how much that signal VARIES across the scored skills (population stddev →
+   clamp(sigma/DISPERSION_REF)). A saturated signal (e.g. the structurally-1.0
+   `error`) gets info weight ~0 and contributes ~nothing to its goal, so the
+   varying signal (`no_redirect`) dominates precision instead of being drowned.
+   The per-signal EFFECTIVE weight is structural_weight * info_weight; no_redirect's
+   0.5x structural de-weight is kept as a SEPARATE factor. Disable with
+   ``--static-weights`` to recover the legacy static composite. See
+   ``compute_signal_info_weights`` for the formula + fallbacks (single-skill cohort
+   and all-saturated-goal both fall back to static weights).
+   Per-goal value = (effective-)weighted mean of its mapped signals that are PRESENT
    (missing signals drop out — the goal is scored on what it has).
 4. Composite: score = Σ_k goal_weights[k] * goal_value[k], renormalized over the
    goals that actually have a value (so a skill missing one whole goal still
