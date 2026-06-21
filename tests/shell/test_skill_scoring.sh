@@ -140,8 +140,11 @@ done
 seed_goals "$SKILL_E" 0.3 0.4 0.3
 
 # ─── Run scoring (half-life huge so the math is plain-mean / deterministic) ───
-echo "=== run scoring (window 30d, min 10, plain mean) ==="
-python3 "$SCORE" --db "$DB" --half-life-days 100000 --json > "$TEST_DIR/out.json" 2>"$TEST_DIR/err.txt"
+# These hand-computed assertions encode the LEGACY static-weight composite, so we
+# pin them with --static-weights (the variance-aware default would re-weight the
+# saturated/sparse signals — exercised in the dedicated section further below).
+echo "=== run scoring (window 30d, min 10, plain mean, STATIC weights) ==="
+python3 "$SCORE" --db "$DB" --half-life-days 100000 --static-weights --json > "$TEST_DIR/out.json" 2>"$TEST_DIR/err.txt"
 cat "$TEST_DIR/err.txt" | tail -3
 
 # 1. Qualifying set is exactly {A, C, D} (B thin, E mostly stale)
