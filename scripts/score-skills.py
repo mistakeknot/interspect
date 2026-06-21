@@ -659,6 +659,12 @@ def main() -> int:
         "--dry-run", action="store_true", help="Compute + print; do not write the json"
     )
     ap.add_argument("--json", action="store_true", help="Emit machine JSON to stdout")
+    ap.add_argument(
+        "--static-weights",
+        action="store_true",
+        help="Disable variance-aware signal weighting (recover legacy static-weight "
+        "composite for comparison/regression).",
+    )
     ap.add_argument("--repo-root", default=".")
     args = ap.parse_args()
 
