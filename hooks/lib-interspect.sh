@@ -2559,6 +2559,9 @@ _interspect_consume_kernel_events() {
 
     # Poll review events via separate query (not in UNION ALL)
     _interspect_consume_review_events || true
+
+    # Poll interlab mutation outcomes (separate SQLite store, not the ic bus)
+    _interspect_consume_interlab_mutations "$session_id" || true
 }
 
 # Process a disagreement_resolved event from the kernel review_events table.
@@ -2717,6 +2720,90 @@ _interspect_consume_review_events() {
     fi
 }
 
+# Consume interlab mutation outcomes into interspect evidence (sylveste-ioe7).
+#
+# interlab experimentally measures which hypotheses win for a given task_type
+# (mutations.db, written by mutation_record) but nothing read them — the
+# producer half of a self-improvement loop with no consumer. This closes it.
+#
+# A winning mutation (is_new_best=1) is recorded as PATTERN-kind evidence, not
+# agent-kind: a mutation describes "this approach won for this task_type", which
+# is a pattern, not an agent's accuracy. Forcing a task_type->agent join would
+# fabricate a mapping the data doesn't carry (live rows have task_type like
+# 'sim-fidelity' and empty metadata). The pattern source is "interlab:<task_type>",
+# event "mutation_best" — _interspect_get_classified_patterns already groups and
+# classifies ALL evidence by (source,event), so these surface in analysis.
+#
+# Cursor is the max mutations.id seen, persisted via `ic state` (same mechanism
+# as the review-event consumer; interlab's DB is separate from the ic bus).
+_interspect_consume_interlab_mutations() {
+    local session_id="$1"
+    command -v sqlite3 &>/dev/null || return 0
+    command -v ic &>/dev/null || return 0
+
+    # interlab's mutation store (mirrors interlab DefaultDBPath()).
+    local mutations_db="${INTERLAB_MUTATIONS_DB:-$HOME/.local/share/interlab/mutations.db}"
+    [[ -f "$mutations_db" ]] || return 0
+
+    local cursor_key="interspect-interlab-mutation-cursor"
+    local since_id
+    since_id=$(ic state get "$cursor_key" "global" 2>/dev/null) || since_id="0"
+    case "$since_id" in '' | *[!0-9]*) since_id="0" ;; esac
+
+    # New winning mutations since the cursor, oldest-first so the cursor advances
+    # monotonically. -json keeps hypotheses with quotes/newlines intact.
+    local rows
+    rows=$(sqlite3 -json "$mutations_db" \
+        "SELECT id, task_type, hypothesis, quality_signal, campaign_id, created_at
+         FROM mutations
+         WHERE is_new_best = 1 AND id > $since_id
+         ORDER BY id ASC
+         LIMIT 100;" 2>/dev/null) || return 0
+    [[ -z "$rows" || "$rows" == "[]" ]] && return 0
+
+    local max_id="$since_id"
+    # Walk each row as a compact JSON object emitted one-per-line by jq.
+    while IFS= read -r row; do
+        [[ -z "$row" ]] && continue
+
+        local mid task_type hypothesis quality campaign created
+        mid=$(echo "$row" | jq -r '.id // 0' 2>/dev/null) || continue
+        task_type=$(echo "$row" | jq -r '.task_type // ""' 2>/dev/null) || task_type=""
+        hypothesis=$(echo "$row" | jq -r '.hypothesis // ""' 2>/dev/null) || hypothesis=""
+        quality=$(echo "$row" | jq -r '.quality_signal // 0' 2>/dev/null) || quality="0"
+        campaign=$(echo "$row" | jq -r '.campaign_id // ""' 2>/dev/null) || campaign=""
+        created=$(echo "$row" | jq -r '.created_at // ""' 2>/dev/null) || created=""
+
+        [[ -z "$task_type" ]] && continue
+
+        local context
+        context=$(jq -n \
+            --arg hypothesis "$hypothesis" \
+            --argjson quality "$quality" \
+            --arg campaign "$campaign" \
+            --arg created "$created" \
+            --argjson mutation_id "$mid" \
+            '{mutation_id:$mutation_id,hypothesis:$hypothesis,quality_signal:$quality,campaign_id:$campaign,created_at:$created}' \
+            2>/dev/null) || continue
+
+        # source_kind=pattern (10th arg): a mutation is a pattern, not an agent.
+        _interspect_insert_evidence \
+            "$session_id" "interlab:${task_type}" "mutation_best" \
+            "" "$context" "interspect-interlab-mutation" \
+            "$mid" "mutations" "" "pattern" \
+            2>/dev/null || true
+
+        if [[ "$mid" -gt "$max_id" ]]; then
+            max_id="$mid"
+        fi
+    done < <(echo "$rows" | jq -c '.[]' 2>/dev/null)
+
+    # Persist cursor only if it advanced.
+    if [[ "$max_id" != "$since_id" ]]; then
+        echo "$max_id" | ic state set "$cursor_key" "global" 2>/dev/null || true
+    fi
+}
+
 # Get a summary of all canaries (for status display).
 # Returns: JSON array of canary status objects
 _interspect_get_canary_summary() {
@@ -2840,7 +2927,7 @@ _interspect_sanitize() {
 _interspect_validate_hook_id() {
     local hook_id="$1"
     case "$hook_id" in
-        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-execution-defect|interspect-verdict|interspect-delegation|interspect-decomposition|interspect-reaction|sprint-review-calibration|tool-time-pattern)
+        interspect-evidence|interspect-session-start|interspect-session-end|interspect-correction|interspect-consumer|interspect-disagreement|interspect-execution-defect|interspect-verdict|interspect-delegation|interspect-decomposition|interspect-reaction|sprint-review-calibration|tool-time-pattern|interspect-interlab-mutation)
             return 0
             ;;
         *)
