@@ -534,11 +534,17 @@ def write_calibration(
     window_days: int,
     min_invocations: int,
     half_life_days: float,
+    signal_info_weights: dict[str, float],
+    static_weights: bool,
 ) -> None:
     """Merge a ``skills`` block into routing-calibration.json (preserving any
     existing ``agents`` block), bump schema_version additively, atomically
     write, then archive a calibration-history snapshot — mirroring
     ``_interspect_write_routing_calibration``.
+
+    The cohort ``signal_info_weights`` (variance-aware weights, empty in static
+    mode) are surfaced inside the ``skills`` block envelope so the weighting is
+    auditable downstream.
     """
     # Load existing calibration (preserve agents + sibling fields).
     existing: dict = {}
@@ -551,12 +557,17 @@ def write_calibration(
         existing = {}
 
     existing["skills"] = _skills_block(scores)
+    existing["signal_info_weights"] = {
+        k: round(v, 4) for k, v in sorted(signal_info_weights.items())
+    }
     existing["skills_calibrated_at"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     existing["skills_calibration"] = {
         "window_days": window_days,
         "min_invocations": min_invocations,
         "half_life_days": half_life_days,
         "qualifying_skills": len(scores),
+        "variance_aware": not static_weights,
+        "dispersion_ref": DISPERSION_REF,
     }
     # Additive schema bump — never downgrade an existing higher version.
     prev = existing.get("schema_version")
