@@ -1,0 +1,11 @@
+{
+  "name": "interspect",
+  "companions": {
+    "recommended": [
+      "interflux",
+      "interstat",
+      "tool-time"
+    ],
+    "optional": []
+  }
+}
