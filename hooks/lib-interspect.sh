@@ -3845,6 +3845,126 @@ _interspect_compute_delegation_stats() {
     ' 2>/dev/null || echo "{}"
 }
 
+# --- Plan→execution pass rate (fc5.4, capability-routing doctrine Rule 7) ---
+# Aggregates plan_execution_outcome evidence per (author, executor, validator)
+# tier triple. Weights rows by session_source (f-043: pilot/self-building-era
+# evidence discounted 0.5/0.7 vs normal 1.0). Explicit min_n distinct from the
+# B3 >=3-sessions precedent (f-008/f-028).
+_interspect_compute_plan_execution_stats() {
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || { echo '{"sufficient_data":false,"total":0}'; return 0; }
+    local min_n="${INTERSPECT_PLAN_EXEC_MIN_N:-5}"
+
+    # Retention (f-030, cheap version): prune plan_execution_outcome evidence
+    # older than 180 days before aggregating. Redirect stdout: _interspect_sqlite_write
+    # may echo the busy_timeout PRAGMA value, which would otherwise pollute the
+    # JSON this function returns via $(...) capture (see skill-canary precedent above).
+    _interspect_sqlite_write "$db" "DELETE FROM evidence WHERE event='plan_execution_outcome' AND ts < datetime('now','-180 days');" >/dev/null 2>&1 || true
+
+    sqlite3 -json "$db" "
+        SELECT
+            json_extract(context, '\$.author_model')    AS author,
+            json_extract(context, '\$.executor_model')  AS executor,
+            json_extract(context, '\$.validator_model') AS validator,
+            json_extract(context, '\$.pass')            AS pass,
+            json_extract(context, '\$.escalation_count') AS escalations,
+            json_extract(context, '\$.session_source')  AS session_source
+        FROM evidence
+        WHERE event='plan_execution_outcome'
+          AND (quarantine_until IS NULL OR quarantine_until <= strftime('%s','now'));
+    " 2>/dev/null | python3 -c "
+import json, sys
+
+min_n = int('$min_n')
+# f-043: reuse the existing source_weight classifier (bootstrap=0.5, self-building=0.7, normal=1.0)
+# so pilot-era rows don't pool at full weight. Values come from the same
+# _INTERSPECT_SOURCE_WEIGHT_* constants _interspect_compute_agent_scores uses.
+source_weights = {
+    'bootstrap': $_INTERSPECT_SOURCE_WEIGHT_BOOTSTRAP,
+    'self-building': $_INTERSPECT_SOURCE_WEIGHT_SELF_BUILDING,
+    'normal': $_INTERSPECT_SOURCE_WEIGHT_NORMAL,
+}
+
+raw = sys.stdin.read().strip()
+rows = json.loads(raw) if raw else []
+
+
+def weight_for(source):
+    return source_weights.get(source or 'normal', source_weights['normal'])
+
+
+def as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'true', 't', 'yes')
+    return False
+
+
+def as_int(value, default=0):
+    try:
+        if value is None or value == '':
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+total = len(rows)
+sum_weight = 0.0
+sum_weighted_pass = 0.0
+cells = {}
+
+for row in rows:
+    author = row.get('author') or 'unknown'
+    executor = row.get('executor') or 'unknown'
+    validator = row.get('validator') or 'unknown'
+    passed = as_bool(row.get('pass'))
+    escalations = as_int(row.get('escalations'))
+    source = row.get('session_source') or 'normal'
+    w = weight_for(source)
+
+    key = f'{author}|{executor}|{validator}'
+    cell = cells.setdefault(key, {'n': 0, '_weight': 0.0, '_weighted_pass': 0.0, 'escalated': 0})
+    cell['n'] += 1
+    cell['_weight'] += w
+    cell['_weighted_pass'] += w * (1.0 if passed else 0.0)
+    if escalations > 0:
+        cell['escalated'] += 1
+
+    sum_weight += w
+    sum_weighted_pass += w * (1.0 if passed else 0.0)
+
+for cell in cells.values():
+    cell['weighted_pass_rate'] = round(cell['_weighted_pass'] / cell['_weight'], 3) if cell['_weight'] > 0 else 0.0
+    del cell['_weight']
+    del cell['_weighted_pass']
+
+overall_pass_rate = round(sum_weighted_pass / sum_weight, 3) if sum_weight > 0 else 0.0
+
+out = {
+    'sufficient_data': total >= min_n,
+    'total': total,
+    'min_n': min_n,
+    'overall_pass_rate': overall_pass_rate,
+    'cells': cells,
+}
+print(json.dumps(out, separators=(',', ':')))
+" 2>/dev/null || echo '{"sufficient_data":false,"total":0}'
+}
+
+_interspect_write_plan_execution_calibration() {
+    local stats out root
+    stats=$(_interspect_compute_plan_execution_stats) || return 0
+    root="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null)}" || root=""
+    [[ -z "$root" ]] && return 0
+    out="${root}/.clavain/interspect/plan-execution-calibration.json"
+    printf '%s' "$stats" | jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{schema_version: 1, generated_at: $ts} + .' > "${out}.tmp" 2>/dev/null && mv "${out}.tmp" "$out"
+}
+
 # Write delegation calibration file atomically.
 # Reads delegation stats, writes .clavain/interspect/delegation-calibration.json.
 _interspect_write_delegation_calibration() {

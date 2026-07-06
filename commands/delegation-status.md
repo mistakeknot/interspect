@@ -160,3 +160,15 @@ else
     echo "Delegation mode:  unknown (routing.yaml not found)"
 fi
 ```
+
+## Plan→Execution (capability routing)
+
+```bash
+PE="${ROOT}/.clavain/interspect/plan-execution-calibration.json"
+if [[ -f "$PE" ]]; then
+  jq -r '"Overall: " + (.overall_pass_rate|tostring) + " (n=" + (.total|tostring) + ", min_n=" + (.min_n|tostring) + ")"' "$PE"
+  jq -r '.cells | to_entries[] | .key + "  n=" + (.value.n|tostring) + "  pass=" + (.value.weighted_pass_rate|tostring) + "  escalated=" + (.value.escalated|tostring)' "$PE"
+else
+  echo "No plan-execution calibration yet — run /interspect:calibrate after quality-gates has recorded plan_execution_outcome evidence."
+fi
+```

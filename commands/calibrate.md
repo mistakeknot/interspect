@@ -114,3 +114,16 @@ else
     fi
 fi
 ```
+
+### Plan→execution pass rate (capability-routing doctrine)
+
+```bash
+_interspect_write_plan_execution_calibration 2>/dev/null || true
+pe_stats=$(_interspect_compute_plan_execution_stats)
+if [[ "$(echo "$pe_stats" | jq -r '.sufficient_data')" == "true" ]]; then
+  echo "Plan→execution pass rate (weighted): $(echo "$pe_stats" | jq -r '.overall_pass_rate') over $(echo "$pe_stats" | jq -r '.total') outcomes"
+  echo "$pe_stats" | jq -r '.cells | to_entries[] | [.key, (.value.n|tostring), (.value.weighted_pass_rate|tostring), (.value.escalated|tostring)] | @tsv' | column -t -s$'\t'
+else
+  echo "Plan→execution: insufficient data ($(echo "$pe_stats" | jq -r '.total')/$(echo "$pe_stats" | jq -r '.min_n // 5') outcomes) — pilot still filling the sample (doctrine Rule 6)"
+fi
+```
