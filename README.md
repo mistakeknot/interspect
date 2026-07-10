@@ -47,6 +47,19 @@ Three hooks collect evidence passively:
 
 Evidence accumulates in SQLite (`.clavain/interspect/interspect.db`). When patterns reach counting-rule thresholds, routing overrides can be proposed and applied. Applied overrides enter a canary period (20 uses over 14 days, 20% regression threshold).
 
+### SessionEnd routing calibration
+
+Clavain calls one authoritative writer after evidence collection:
+
+```bash
+bash scripts/write-routing-calibration.sh
+```
+
+The exit contract is `0` when the routing artifact was updated, `2` for a
+valid no-op with no scoreable evidence, and `1` for a hard failure. The general
+`_interspect_auto_calibrate` helper deliberately does not write the routing
+artifact, preventing duplicate writes in one SessionEnd sequence.
+
 ## Skill Calibration
 
 The same closed loop also tunes **skills**, not just agents. Every Claude Code

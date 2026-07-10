@@ -3680,7 +3680,7 @@ _interspect_write_routing_calibration() {
 
     local scores
     scores=$(_interspect_compute_agent_scores)
-    [[ "$scores" == "[]" || -z "$scores" ]] && return 0
+    [[ "$scores" == "[]" || -z "$scores" ]] && return 2
 
     local calibration_dir
     calibration_dir="$(dirname "$db")"
@@ -3746,11 +3746,6 @@ _interspect_write_routing_calibration() {
 _interspect_auto_calibrate() {
     command -v clavain-cli >/dev/null 2>&1 || return 0
     clavain-cli interspect-calibrate-thresholds --window-days=30 2>/dev/null || true
-
-    # Routing calibration is part of the session-end learning loop. Verdict
-    # recording happens during quality-gates; this turns those receipts into
-    # model recommendations for the next session.
-    _interspect_write_routing_calibration 2>/dev/null || true
 
     # Review phase calibration
     # Writes review-phase-calibration.yaml when >=20 review_phase_outcome events per phase exist.
