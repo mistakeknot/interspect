@@ -192,7 +192,7 @@ echo ""
 echo "=== Group 8: tool path does NOT pollute overlays/ ==="
 # Tool remediations live in tool-remediations/, NOT overlays/. The overlay-read
 # path would silently include tool content if we got the directory wrong.
-OVERLAY_FILES=$(find "$TEST_DIR/.clavain/interspect/overlays" -type f 2>/dev/null | wc -l)
+OVERLAY_FILES=$(find "$TEST_DIR/.clavain/interspect/overlays" -type f 2>/dev/null | wc -l | tr -d '[:space:]')
 assert_eq "no files in overlays/ after tool work" "$OVERLAY_FILES" "0"
 
 TR_FILES=$(find "$TEST_DIR/.clavain/interspect/tool-remediations" -type f 2>/dev/null | wc -l)
