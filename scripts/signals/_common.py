@@ -67,6 +67,7 @@ def pending_evidence(
         "SELECT e.source_event_id, e.session_id, e.source, e.ts, e.project "
         "FROM evidence e "
         "WHERE e.source_kind = 'skill' "
+        "  AND e.event = 'skill_invocation' "
         "  AND e.source_event_id IS NOT NULL "
         "  AND NOT EXISTS ("
         "    SELECT 1 FROM skill_signals s "

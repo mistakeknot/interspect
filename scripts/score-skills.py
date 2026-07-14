@@ -269,7 +269,8 @@ def qualifying_skills(
     """Skills with >= min_invocations distinct skill invocations in the window.
 
     Counts distinct ``evidence.source_event_id`` (the invocation_id) for
-    ``source_kind='skill'`` rows whose ``ts`` is within the window. Returns
+    completed ``source_kind='skill'`` invocation rows whose ``ts`` is within
+    the window. Route-decision evidence is intentionally excluded. Returns
     [(skill_name, invocations_30d)] sorted by name for determinism.
     """
     rows = conn.execute(
@@ -277,6 +278,7 @@ def qualifying_skills(
         "       COUNT(DISTINCT source_event_id) AS n "
         "FROM evidence "
         "WHERE source_kind = 'skill' "
+        "  AND event = 'skill_invocation' "
         "  AND source_event_id IS NOT NULL "
         "  AND ts >= ? "
         "GROUP BY source "

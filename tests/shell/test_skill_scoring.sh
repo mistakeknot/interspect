@@ -139,6 +139,17 @@ for i in $(seq 1 2); do
 done
 seed_goals "$SKILL_E" 0.3 0.4 0.3
 
+# ─── Skill F: route decisions are not completed invocations ─────────────────
+# 12 route-selection rows must not satisfy the 10-invocation scoring threshold.
+SKILL_F="zeta:route-only"
+for i in $(seq 1 12); do
+    sqlite3 "$DB" "INSERT INTO evidence
+        (ts, session_id, seq, source, event, context, project, source_event_id,
+         source_table, quarantine_until, source_kind)
+        VALUES ('$TS_RECENT', 'route-$i', 1, '$SKILL_F', 'skill_route', '{}',
+                '$TEST_DIR', 'route-$i#$SKILL_F', 'intermesh_routes', 0, 'skill');"
+done
+
 # ─── Run scoring (half-life huge so the math is plain-mean / deterministic) ───
 # These hand-computed assertions encode the LEGACY static-weight composite, so we
 # pin them with --static-weights (the variance-aware default would re-weight the
@@ -155,6 +166,8 @@ assert_eq "skill B (9 inv) excluded" \
     "$(python3 -c "import json;print('beta:thin' in json.load(open('$TEST_DIR/out.json'))['skills'])")" "False"
 assert_eq "skill E (2 in-window) excluded" \
     "$(python3 -c "import json;print('epsilon:stale' in json.load(open('$TEST_DIR/out.json'))['skills'])")" "False"
+assert_eq "route-only skill excluded from invocation scoring" \
+    "$(python3 -c "import json;print('zeta:route-only' in json.load(open('$TEST_DIR/out.json'))['skills'])")" "False"
 
 # 2. Composite math for A == 0.78
 A_SCORE=$(python3 -c "import json;print(round(json.load(open('$TEST_DIR/out.json'))['skills']['alpha:full']['score'],4))")

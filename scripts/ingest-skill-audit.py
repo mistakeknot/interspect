@@ -2,12 +2,12 @@
 """Ingest skill invocations into the Interspect evidence store (sylveste-7aj8.2).
 
 Source-agnostic adapter: drains `tool: "Skill"` rows from a tool-invocation
-log into two tables:
+log and `intermesh.route.v1` receipts into the evidence store:
 
   - `evidence`     — one row per skill invocation, source_kind='skill',
                      event='skill_invocation'. Used by pattern/classification
                      queries the same way agent/tool rows are.
-  - `skill_signals`— one 'error' signal row per invocation
+  - `skill_signals`— one 'error' signal row per completed invocation
                      (value 1.0 = success, 0.0 = failure). The
                      UNIQUE(invocation_id, signal_kind) constraint makes the
                      insert idempotent.
@@ -17,7 +17,9 @@ Source selection (adapter):
      and non-empty → parse as audit-log schema
      (docs/contracts/audit-log-schema.md).
   2. Otherwise `~/.claude/tool-time/events.jsonl` → parse as tool-time schema.
-  Override with --source <path> and --format auto|audit|tooltime.
+  3. Intermesh receipts are explicitly selected with `--format intermesh`;
+     they record routing decisions but never fabricate success signals.
+  Override with --source <path> and --format auto|audit|tooltime|intermesh.
 
 Incremental watermark: a single global cursor in the `sentinels` table
 (key 'skill_ingest_watermark') stores the max processed `ts`. Repeated runs
@@ -27,7 +29,7 @@ correct, and the idempotent inserts (UNIQUE on skill_signals, source_event_id
 guard on evidence) cover any overlap from --since backfills or clock skew.
 
 Usage:
-  ingest-skill-audit.py [--source <path>] [--format auto|audit|tooltime]
+  ingest-skill-audit.py [--source <path>] [--format auto|audit|tooltime|intermesh]
                         [--db <path>] [--since <ISO8601|30d>] [--dry-run]
                         [--repo-root .]
 """
@@ -71,8 +73,10 @@ class SkillRecord(NamedTuple):
     session_id: str
     skill_name: str
     ts: str
-    success: bool
+    success: bool | None
     project: str | None
+    event: str = "skill_invocation"
+    context: str = "{}"
 
 
 # ─── Source selection ────────────────────────────────────────────────────────
@@ -80,11 +84,12 @@ class SkillRecord(NamedTuple):
 AUDIT_LOG = "~/.claude/audit.log"
 AUDIT_LOG_GZ = "~/.claude/audit.log.1.gz"
 TOOLTIME = "~/.claude/tool-time/events.jsonl"
+INTERMESH = "~/.local/state/intermesh/routes.jsonl"
 
 
 class Source(NamedTuple):
     paths: list[Path]
-    fmt: str  # 'audit' | 'tooltime'
+    fmt: str  # 'audit' | 'tooltime' | 'intermesh'
 
 
 def _nonempty(path: Path) -> bool:
@@ -106,17 +111,22 @@ def select_source(source_arg: str | None, fmt_arg: str) -> Source:
         fmt = fmt_arg
         if fmt == "auto":
             # Infer from filename when not pinned.
-            fmt = "tooltime" if "events.jsonl" in path.name else "audit"
+            if path.name == "routes.jsonl":
+                fmt = "intermesh"
+            else:
+                fmt = "tooltime" if "events.jsonl" in path.name else "audit"
         return Source(paths=[path], fmt=fmt)
 
-    if fmt_arg in ("audit", "tooltime"):
+    if fmt_arg in ("audit", "tooltime", "intermesh"):
         # Format pinned but no explicit source — use that format's default path.
         if fmt_arg == "audit":
             current = Path(os.path.expanduser(AUDIT_LOG))
             gz = Path(os.path.expanduser(AUDIT_LOG_GZ))
             paths = [p for p in (current, gz) if p.is_file()]
             return Source(paths=paths, fmt="audit")
-        return Source(paths=[Path(os.path.expanduser(TOOLTIME))], fmt="tooltime")
+        if fmt_arg == "tooltime":
+            return Source(paths=[Path(os.path.expanduser(TOOLTIME))], fmt="tooltime")
+        return Source(paths=[Path(os.path.expanduser(INTERMESH))], fmt="intermesh")
 
     # auto: prefer audit.log if present + non-empty.
     current = Path(os.path.expanduser(AUDIT_LOG))
@@ -213,8 +223,60 @@ def parse_tooltime(lines: Iterator[str]) -> Iterator[SkillRecord]:
         )
 
 
+def parse_intermesh(lines: Iterator[str]) -> Iterator[SkillRecord]:
+    """Expand each Intermesh route receipt into one decision row per skill."""
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("event") != "intermesh.route.v1":
+            continue
+        route_id = obj.get("route_id") or ""
+        ts = obj.get("timestamp") or ""
+        candidates = obj.get("candidates")
+        if not route_id or not ts or not isinstance(candidates, list):
+            continue
+        for index, candidate in enumerate(candidates):
+            if not isinstance(candidate, dict):
+                continue
+            skill_name = candidate.get("id") or ""
+            if not skill_name:
+                continue
+            context = {
+                "route_id": route_id,
+                "host": obj.get("host") or "",
+                "query_hash": obj.get("query_hash") or "",
+                "registry_fingerprint": obj.get("registry_fingerprint") or "",
+                "rank": index + 1,
+                "score": candidate.get("score"),
+                "selected_by": candidate.get("selected_by") or "rank",
+                "required_by": candidate.get("required_by") or [],
+                "warnings": obj.get("warnings") or [],
+                "latency_micros": obj.get("latency_micros"),
+            }
+            yield SkillRecord(
+                invocation_id=f"{route_id}#{index}:{skill_name}",
+                session_id=route_id,
+                skill_name=skill_name,
+                ts=ts,
+                success=None,
+                project=obj.get("cwd"),
+                event="skill_route",
+                context=json.dumps(context, sort_keys=True, separators=(",", ":")),
+            )
+
+
 def read_records(source: Source) -> Iterator[SkillRecord]:
-    parser = parse_audit if source.fmt == "audit" else parse_tooltime
+    parsers = {
+        "audit": parse_audit,
+        "tooltime": parse_tooltime,
+        "intermesh": parse_intermesh,
+    }
+    parser = parsers[source.fmt]
 
     def all_lines() -> Iterator[str]:
         for p in source.paths:
@@ -226,20 +288,23 @@ def read_records(source: Source) -> Iterator[SkillRecord]:
 # ─── Watermark ───────────────────────────────────────────────────────────────
 
 WATERMARK_KEY = "skill_ingest_watermark"
+INTERMESH_WATERMARK_KEY = "intermesh_route_ingest_watermark"
 
 
-def get_watermark(conn: sqlite3.Connection) -> str | None:
+def get_watermark(conn: sqlite3.Connection, key: str = WATERMARK_KEY) -> str | None:
     row = conn.execute(
-        "SELECT value FROM sentinels WHERE key = ?", (WATERMARK_KEY,)
+        "SELECT value FROM sentinels WHERE key = ?", (key,)
     ).fetchone()
     return row[0] if row else None
 
 
-def set_watermark(conn: sqlite3.Connection, value: str) -> None:
+def set_watermark(
+    conn: sqlite3.Connection, value: str, key: str = WATERMARK_KEY
+) -> None:
     conn.execute(
         "INSERT INTO sentinels (key, value) VALUES (?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (WATERMARK_KEY, value),
+        (key, value),
     )
 
 
@@ -334,7 +399,8 @@ def ingest(
                 stats["duplicates_skipped"] += 1  # type: ignore[operator]
             else:
                 stats["evidence_inserted"] += 1  # type: ignore[operator]
-                stats["signals_inserted"] += 1  # type: ignore[operator]
+                if rec.success is not None:
+                    stats["signals_inserted"] += 1  # type: ignore[operator]
             continue
 
         # --- Evidence row (idempotent via source_event_id guard) ---
@@ -347,15 +413,18 @@ def ingest(
                 " override_reason, context, project, project_lang, "
                 " project_type, source_event_id, source_table, "
                 " raw_override_reason, quarantine_until, source_kind) "
-                "VALUES (?, ?, ?, ?, NULL, 'skill_invocation', NULL, '{}', "
-                "        ?, NULL, NULL, ?, 'skill_signals', NULL, 0, 'skill')",
+                "VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, "
+                "        ?, NULL, NULL, ?, ?, NULL, 0, 'skill')",
                 (
                     rec.ts,
                     rec.session_id,
                     seq,
                     rec.skill_name,
+                    rec.event,
+                    rec.context,
                     rec.project or "",
                     rec.invocation_id,
+                    "intermesh_routes" if rec.event == "skill_route" else "skill_signals",
                 ),
             )
             stats["evidence_inserted"] += 1  # type: ignore[operator]
@@ -363,22 +432,23 @@ def ingest(
             stats["duplicates_skipped"] += 1  # type: ignore[operator]
 
         # --- Signal row (idempotent via UNIQUE(invocation_id, signal_kind)) ---
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO skill_signals "
-            "(skill_name, session_id, invocation_id, signal_kind, value, "
-            " raw_value, observed_at, metadata) "
-            "VALUES (?, ?, ?, 'error', ?, ?, ?, NULL)",
-            (
-                rec.skill_name,
-                rec.session_id,
-                rec.invocation_id,
-                1.0 if rec.success else 0.0,
-                0 if rec.success else 1,
-                rec.ts,
-            ),
-        )
-        if cur.rowcount and cur.rowcount > 0:
-            stats["signals_inserted"] += 1  # type: ignore[operator]
+        if rec.success is not None:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO skill_signals "
+                "(skill_name, session_id, invocation_id, signal_kind, value, "
+                " raw_value, observed_at, metadata) "
+                "VALUES (?, ?, ?, 'error', ?, ?, ?, NULL)",
+                (
+                    rec.skill_name,
+                    rec.session_id,
+                    rec.invocation_id,
+                    1.0 if rec.success else 0.0,
+                    0 if rec.success else 1,
+                    rec.ts,
+                ),
+            )
+            if cur.rowcount and cur.rowcount > 0:
+                stats["signals_inserted"] += 1  # type: ignore[operator]
 
     # Touch now_iso reference for potential future use (keeps lints quiet).
     _ = now_iso
@@ -390,7 +460,7 @@ def main() -> int:
     ap.add_argument("--source", default=None, help="Override source path")
     ap.add_argument(
         "--format",
-        choices=["auto", "audit", "tooltime"],
+        choices=["auto", "audit", "tooltime", "intermesh"],
         default="auto",
         help="Source format (default: auto)",
     )
@@ -441,7 +511,12 @@ def main() -> int:
                 file=sys.stderr,
             )
         else:
-            lower_bound = get_watermark(conn)
+            watermark_key = (
+                INTERMESH_WATERMARK_KEY
+                if source.fmt == "intermesh"
+                else WATERMARK_KEY
+            )
+            lower_bound = get_watermark(conn, watermark_key)
             if lower_bound:
                 print(
                     f"ingest-skill-audit: watermark lower bound = {lower_bound}",
@@ -455,7 +530,12 @@ def main() -> int:
             new_max = str(stats["max_ts"])
             # Advance the watermark only forward.
             if new_max and (lower_bound is None or new_max > lower_bound):
-                set_watermark(conn, new_max)
+                watermark_key = (
+                    INTERMESH_WATERMARK_KEY
+                    if source.fmt == "intermesh"
+                    else WATERMARK_KEY
+                )
+                set_watermark(conn, new_max, watermark_key)
                 stats["watermark_advanced_to"] = new_max
             else:
                 stats["watermark_advanced_to"] = lower_bound or "(unchanged)"

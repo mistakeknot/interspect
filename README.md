@@ -71,7 +71,14 @@ description triggers too eagerly or too rarely — turned into an overlay at
 the source SKILL.md. Safe-list patches (`tighten_description`, `when_to_use_add`)
 auto-apply under autonomy with canary monitoring; body rewrites and availability
 changes are always propose-only. Interspect reads only `~/.claude/audit.log` for
-this — `tool-time` keeps its own `events.jsonl` untouched.
+completed Claude skill invocations; `tool-time` keeps its own `events.jsonl`
+untouched.
+
+When Intermesh is installed, the Stop hook also drains
+`~/.local/state/intermesh/routes.jsonl`. Each `intermesh.route.v1` candidate is
+stored as `skill_route` decision evidence with its `route_id`, but no success
+signal is created until an actual outcome is observed. Intermesh never writes
+the Interspect database or calibration artifacts.
 
 ## Architecture
 

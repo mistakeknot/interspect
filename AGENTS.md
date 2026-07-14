@@ -120,6 +120,7 @@ Generalizes the routing loop from `source_kind='agent'` to skills. Pipeline:
 - **Signal→goal mapping:** `tokens→speed`, `error→precision`, `no_redirect→precision` (0.5×), `bead_close→completeness`.
 - **Per-action autonomy:** `tighten_description` / `when_to_use_add` auto-apply under `/interspect:enable-autonomy`; `skill_md_body_rewrite` / `availability` are propose-only (safe-list in `skill-autonomy-policy.json`).
 - All `/interspect:{tune,propose,approve,revert,status,effectiveness,health}` accept `--source-kind=skill`.
+- Optional `intermesh.route.v1` receipts enter the same evidence table as `event='skill_route'` decision rows. They carry no synthetic success signal; `route_id` is retained for later outcome attachment.
 
 ## Data Storage
 
@@ -137,7 +138,8 @@ Generalizes the routing loop from `source_kind='agent'` to skills. Pipeline:
 | Intercore | Dual-read from `interspect_events` kernel table via `ic interspect query`; kernel events consumed at session start |
 | flux-drive agents | The subjects being profiled; routing overrides target flux-drive agent IDs |
 | interpulse | interpulse monitors context pressure; interspect monitors routing quality (complementary) |
-| tool-time | **Boundary:** tool-time continues to own `~/.claude/tool-time/events.jsonl` for its community-comparison flows. Interspect reads only `~/.claude/audit.log` (the `tool:"Skill"` rows) for skill calibration — it never reads or writes tool-time's event log. The two share no storage. |
+| tool-time | **Boundary:** tool-time continues to own `~/.claude/tool-time/events.jsonl` for its community-comparison flows. Completed Claude skill-invocation signals come from `~/.claude/audit.log`; Interspect never reads or writes tool-time's event log. The two share no storage. |
+| Intermesh | Optional routing-decision input from `~/.local/state/intermesh/routes.jsonl`; Interspect owns outcome attachment and calibration, while Intermesh never writes Interspect state. |
 | skills (Skill loader) | The subjects of skill calibration; skill overlays at `~/.claude/skill-overlays/` are merged over source SKILL.md by the loader |
 
 ## Testing

@@ -8,6 +8,7 @@
 #   3. Failed skill (error non-null) → error signal value 0.0
 #   4. audit-log-format fixture → ingests correctly (proves the adapter)
 #   5. Watermark: rows at/below the stored watermark are skipped
+#   6. Intermesh route receipts become route evidence without fake outcomes
 
 set -eo pipefail
 
@@ -146,6 +147,40 @@ NEW_PRESENT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source='new:ski
 assert_eq "row newer than watermark ingested" "$NEW_PRESENT" "1"
 WM2=$(sqlite3 "$DB" "SELECT value FROM sentinels WHERE key='skill_ingest_watermark';")
 assert_eq "watermark advanced to newest ts" "$WM2" "2026-07-01T00:00:00Z"
+
+echo ""
+echo "=== intermesh route receipt adapter ==="
+ROUTE_DIR="$TEST_DIR/route_proj"
+mkdir -p "$ROUTE_DIR/.clavain/interspect"
+export CLAUDE_PROJECT_DIR="$ROUTE_DIR"
+unset _INTERSPECT_DB _INTERSPECT_MANIFEST_LOADED _INTERSPECT_CONFIDENCE_LOADED
+_interspect_ensure_db
+RDB=$(_interspect_db_path)
+
+ROUTE_FIXTURE="$TEST_DIR/routes.jsonl"
+cat > "$ROUTE_FIXTURE" <<'JSONL'
+{"event":"intermesh.route.v1","route_id":"route-123","timestamp":"2026-07-02T12:00:00Z","query_hash":"sha256:abc","host":"codex","cwd":"/work/demo","registry_fingerprint":"sha256:def","limit":2,"candidates":[{"id":"intertest:test-driven-development","skill_md":"/skills/tdd/SKILL.md","score":42.0,"reasons":["phrase:test driven"],"selected_by":"requirement","required_by":["intertest:verification-before-completion"]},{"id":"intertest:verification-before-completion","skill_md":"/skills/verify/SKILL.md","score":40.0,"reasons":["lexical:verify"],"selected_by":"rank","required_by":[]}],"warnings":[],"latency_micros":1234}
+{"event":"other.event","route_id":"ignore-me","timestamp":"2026-07-02T12:01:00Z","candidates":[{"id":"ignored:skill"}]}
+JSONL
+python3 "$INGEST" --source "$ROUTE_FIXTURE" --format intermesh --db "$RDB" 2>/dev/null
+
+R_EV=$(sqlite3 "$RDB" "SELECT COUNT(*) FROM evidence WHERE source_kind='skill' AND event='skill_route';")
+assert_eq "intermesh: one route evidence row per candidate" "$R_EV" "2"
+R_SIG=$(sqlite3 "$RDB" "SELECT COUNT(*) FROM skill_signals;")
+assert_eq "intermesh: selection does not fabricate outcome signals" "$R_SIG" "0"
+R_ROUTE=$(sqlite3 "$RDB" "SELECT json_extract(context, '$.route_id') FROM evidence WHERE source='intertest:verification-before-completion';")
+assert_eq "intermesh: route_id retained for outcome attachment" "$R_ROUTE" "route-123"
+R_SELECTED=$(sqlite3 "$RDB" "SELECT json_extract(context, '$.selected_by') FROM evidence WHERE source='intertest:test-driven-development';")
+assert_eq "intermesh: requirement selection retained" "$R_SELECTED" "requirement"
+
+python3 "$INGEST" --source "$ROUTE_FIXTURE" --format intermesh --db "$RDB" --since "2026-01-01T00:00:00Z" 2>/dev/null
+R_EV2=$(sqlite3 "$RDB" "SELECT COUNT(*) FROM evidence WHERE source_kind='skill' AND event='skill_route';")
+assert_eq "intermesh: receipt ingestion is idempotent" "$R_EV2" "2"
+python3 "$SCRIPT_DIR/scripts/signals/collect_error.py" --db "$RDB" 2>/dev/null
+R_SIG2=$(sqlite3 "$RDB" "SELECT COUNT(*) FROM skill_signals;")
+assert_eq "intermesh: route decisions are excluded from outcome collectors" "$R_SIG2" "0"
+assert_eq "intermesh: Stop hook drains receipts for outcome attachment" \
+    "$(grep -c -- '--format intermesh' "$SCRIPT_DIR/hooks/interspect-session-end.sh")" "1"
 
 echo ""
 echo "─────────────────────────"

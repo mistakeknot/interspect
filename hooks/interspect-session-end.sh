@@ -37,6 +37,15 @@ sqlite3 "$_INTERSPECT_DB" \
     "UPDATE sessions SET end_ts = '${TS}' WHERE session_id = '${E_SID}' AND end_ts IS NULL;" \
     2>/dev/null || true
 
+# Drain Intermesh routing receipts while the completed session's outcome is
+# still fresh. Route rows are decision evidence only; the ingestion adapter
+# deliberately emits no synthetic success/failure signal. Missing Intermesh
+# state is expected and always fails open.
+if command -v python3 &>/dev/null; then
+    python3 "${SCRIPT_DIR}/../scripts/ingest-skill-audit.py" \
+        --format intermesh --db "$_INTERSPECT_DB" >/dev/null 2>&1 || true
+fi
+
 # Record canary samples (if any active canaries exist)
 # Fail-open: errors here must not block session teardown
 _interspect_record_canary_sample "$SESSION_ID" 2>/dev/null || true

@@ -248,7 +248,7 @@ def collect(
     def sessions_running(skill_name: str) -> set[str]:
         rows = conn.execute(
             "SELECT DISTINCT session_id FROM evidence "
-            "WHERE source_kind='skill' AND source = ?",
+            "WHERE source_kind='skill' AND event='skill_invocation' AND source = ?",
             (skill_name,),
         ).fetchall()
         return {r[0] for r in rows}

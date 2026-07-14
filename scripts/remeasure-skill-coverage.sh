@@ -47,7 +47,7 @@ python3 scripts/infer-skill-goals.py --mock --db "$DB" >/dev/null 2>&1 || true
 LEADER="$(python3 scripts/score-skills.py --db "$DB" --window-days "$WINDOW_DAYS" --min-invocations "$MIN_INV" 2>&1)"
 
 # Coverage metrics (independent of scoring threshold).
-TOTAL_INV="$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source_kind='skill';" 2>/dev/null)"
+TOTAL_INV="$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source_kind='skill' AND event='skill_invocation';" 2>/dev/null)"
 COVERAGE="$(sqlite3 "$DB" "SELECT signal_kind || ': ' || COUNT(*) || ' rows / ' || COUNT(DISTINCT skill_name) || ' skills' FROM skill_signals GROUP BY signal_kind;" 2>/dev/null)"
 
 {
