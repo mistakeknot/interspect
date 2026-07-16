@@ -15,6 +15,14 @@ docs/research/interspect-audit/{YYYY-QN}-calibration-audit.md.
 
 If no historical snapshot is old enough, exits 0 with a "bootstrap" report.
 
+Additionally (Sylveste-4b5.1 Phase-1 metrics emission): each run computes a
+consensus-trend point from interspect.db — agreement_rate, output_diversity,
+defect_escape_rate, evidence_n — and appends it as one JSON line to
+.clavain/interspect/consensus-trend.jsonl. This is retrospective-trend
+instrumentation for the consensus-trap kill rule (see docs/research/
+interspect-audit/2026-07-16-consensus-trap-phase1.md); it does not gate or
+fire any breaker on its own.
+
 Usage:
   calibrate-audit.py [--window-days=90] [--hit-rate-delta=0.2]
                      [--rank-delta=5] [--min-correlation=0.7]
@@ -25,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -107,6 +116,168 @@ def quarter_label(now: datetime) -> str:
     return f"{now.year}-Q{q}"
 
 
+def compute_consensus_trend_point(
+    db_path: Path, now: datetime, window_days: int
+) -> dict | None:
+    """Compute one consensus-trend point from interspect.db evidence.
+
+    Definitions (Sylveste-4b5.1 Phase-1; see docs/research/interspect-audit/
+    2026-07-16-consensus-trap-phase1.md for full derivation + limitations):
+
+      agreement_rate: among agent-sourced evidence rows in the window,
+        1 - (rows with a non-empty override_reason / total agent rows).
+        Proxy for verifier-vs-generator agreement. Currently always 1.0
+        while override_reason is unpopulated across the fleet — documented
+        limitation, not a measured signal yet.
+
+      output_diversity: mean distinct evidence `source` values per session
+        in the window, divided by the total distinct `source` values seen
+        in the window. 1.0 = every session touches every source (low
+        diversity per session relative to the whole); lower = sessions
+        specialize on fewer sources. Proxy only; does not inspect actual
+        generated content.
+
+      defect_escape_rate: 1 - avg(value) over skill_signals rows with
+        signal_kind='error' in the window. skill_signals.value is a
+        goodness score in [0,1] (1.0 = clean), so this is the mean deficit.
+        Proxy for "problems surfacing after the loop approved something";
+        it is a skill-invocation error rate, not a verified downstream
+        defect count, since no field currently distinguishes pre- vs
+        post-approval discovery.
+
+    Returns None if the db is missing or unreadable. Returns a dict with
+    evidence_n=0 (and metrics as None) if the db exists but the window has
+    no rows.
+    """
+    if not db_path.exists():
+        return None
+
+    cutoff = (now - timedelta(days=window_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return None
+
+    try:
+        cur = conn.cursor()
+
+        # --- agreement_rate ---
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN override_reason IS NOT NULL
+                         AND override_reason != '' THEN 1 ELSE 0 END) AS overridden
+            FROM evidence
+            WHERE source_kind = 'agent' AND ts >= ?
+            """,
+            (cutoff,),
+        )
+        row = cur.fetchone()
+        agent_total = row["total"] or 0
+        agreement_rate = (
+            1.0 - (row["overridden"] or 0) / agent_total if agent_total else None
+        )
+
+        # --- output_diversity ---
+        cur.execute(
+            "SELECT COUNT(DISTINCT source) FROM evidence WHERE ts >= ?",
+            (cutoff,),
+        )
+        total_distinct_sources = cur.fetchone()[0] or 0
+
+        cur.execute(
+            """
+            SELECT session_id, COUNT(DISTINCT source) AS n_sources
+            FROM evidence
+            WHERE ts >= ?
+            GROUP BY session_id
+            """,
+            (cutoff,),
+        )
+        per_session = [r["n_sources"] for r in cur.fetchall()]
+        output_diversity = (
+            (sum(per_session) / len(per_session)) / total_distinct_sources
+            if per_session and total_distinct_sources
+            else None
+        )
+
+        # --- defect_escape_rate ---
+        has_skill_signals = cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='skill_signals'"
+        ).fetchone()
+        defect_escape_rate = None
+        if has_skill_signals:
+            cur.execute(
+                """
+                SELECT AVG(value) AS avg_value, COUNT(*) AS n
+                FROM skill_signals
+                WHERE signal_kind = 'error' AND observed_at >= ?
+                """,
+                (cutoff,),
+            )
+            row = cur.fetchone()
+            if row["n"]:
+                defect_escape_rate = 1.0 - row["avg_value"]
+
+        # --- evidence_n: total evidence rows in window (denominator context) ---
+        cur.execute("SELECT COUNT(*) FROM evidence WHERE ts >= ?", (cutoff,))
+        evidence_n = cur.fetchone()[0] or 0
+
+    except sqlite3.Error:
+        # Malformed/table-less DB or unwritable WAL side-files: honor the
+        # docstring's "None if unreadable" contract instead of crashing the
+        # pre-existing drift-audit path.
+        return None
+    finally:
+        conn.close()
+
+    return {
+        "cycle_ts": now.isoformat(),
+        "agreement_rate": agreement_rate,
+        "output_diversity": output_diversity,
+        "defect_escape_rate": defect_escape_rate,
+        "evidence_n": evidence_n,
+    }
+
+
+def append_consensus_trend(calibration_dir: Path, point: dict) -> Path:
+    """Append one consensus-trend point as a JSON line. Creates the file if missing."""
+    trend_path = calibration_dir / "consensus-trend.jsonl"
+    with trend_path.open("a") as f:
+        f.write(json.dumps(point, sort_keys=True) + "\n")
+    return trend_path
+
+
+def render_consensus_trend_section(point: dict | None, trend_path: Path | None) -> list[str]:
+    lines = ["## Consensus-trend (Sylveste-4b5.1 Phase-1 metrics emission)", ""]
+    if point is None:
+        lines += [
+            "No interspect.db found — consensus-trend point not computed this run.",
+            "",
+        ]
+        return lines
+
+    def fmt(v):
+        return f"{v:.3f}" if isinstance(v, (int, float)) else "n/a (no evidence in window)"
+
+    lines += [
+        f"- agreement_rate: {fmt(point['agreement_rate'])}",
+        f"- output_diversity: {fmt(point['output_diversity'])}",
+        f"- defect_escape_rate: {fmt(point['defect_escape_rate'])}",
+        f"- evidence_n: {point['evidence_n']}",
+        "",
+        f"Appended to `{trend_path}`." if trend_path else "",
+        "",
+        "See docs/research/interspect-audit/2026-07-16-consensus-trap-phase1.md "
+        "for metric definitions, limitations, and kill-rule status.",
+        "",
+    ]
+    return [l for l in lines if l is not None]
+
+
 def render_report(
     *,
     now: datetime,
@@ -115,6 +286,7 @@ def render_report(
     drift_findings: list[dict],
     correlation: float | None,
     args: argparse.Namespace,
+    consensus_trend_lines: list[str] | None = None,
 ) -> str:
     lines = [
         f"# Interspect calibration audit — {quarter_label(now)}",
@@ -174,6 +346,9 @@ def render_report(
             )
         lines.append("")
 
+    if consensus_trend_lines:
+        lines += [""] + consensus_trend_lines
+
     lines += [
         "## Methodology",
         "",
@@ -212,17 +387,41 @@ def main() -> int:
     ap.add_argument("--rank-delta", type=int, default=5)
     ap.add_argument("--min-correlation", type=float, default=0.7)
     ap.add_argument("--repo-root", default=".")
+    ap.add_argument(
+        "--dry-run-safe",
+        action="store_true",
+        help=(
+            "Test invocation: compute and print the consensus-trend point "
+            "without writing consensus-trend.jsonl or the markdown report. "
+            "Safe to run against a scratch copy of the state dir."
+        ),
+    )
     args = ap.parse_args()
 
     repo_root = find_repo_root(Path(args.repo_root))
     calibration_dir = repo_root / ".clavain" / "interspect"
     current_path = calibration_dir / "routing-calibration.json"
     history_dir = calibration_dir / "calibration-history"
+    db_path = calibration_dir / "interspect.db"
     report_dir = repo_root / "docs" / "research" / "interspect-audit"
-    report_dir.mkdir(parents=True, exist_ok=True)
 
     now = datetime.now(timezone.utc)
+
+    # Consensus-trend point (Sylveste-4b5.1 Phase-1): computed independent of
+    # whether routing-calibration.json exists yet, since the metrics are
+    # derived straight from evidence, not from the calibration artifact.
+    trend_point = compute_consensus_trend_point(db_path, now, args.window_days)
+
+    if args.dry_run_safe:
+        print(json.dumps(trend_point, indent=2, sort_keys=True))
+        return 0
+
+    report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"{quarter_label(now)}-calibration-audit.md"
+
+    trend_path: Path | None = None
+    if trend_point is not None:
+        trend_path = append_consensus_trend(calibration_dir, trend_point)
 
     current = load_calibration(current_path)
     if current is None:
@@ -275,6 +474,7 @@ def main() -> int:
         drift_findings=drift_findings,
         correlation=correlation,
         args=args,
+        consensus_trend_lines=render_consensus_trend_section(trend_point, trend_path),
     )
     report_path.write_text(report)
     print(report_path)
