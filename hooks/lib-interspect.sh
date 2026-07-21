@@ -367,6 +367,10 @@ _interspect_sqlite_write() {
     while [[ $attempt -lt $max_attempts ]]; do
         output=$(sqlite3 -cmd "PRAGMA busy_timeout=5000;" "$db" "$sql" "$@" 2>&1)
         rc=$?
+        # Some sqlite3 builds (macOS ships one) echo the -cmd PRAGMA value as
+        # a leading "5000" line — strip it so callers' stdout stays clean.
+        output="${output#5000$'\n'}"
+        [[ "$output" == "5000" ]] && output=""
         if [[ $rc -eq 0 ]]; then
             [[ -n "$output" ]] && echo "$output"
             return 0
@@ -962,14 +966,27 @@ _interspect_read_routing_overrides_locked() {
 
     mkdir -p "$lockdir" 2>/dev/null || true
 
-    (
-        # Shared lock allows concurrent reads, blocks on exclusive write lock.
-        # Timeout 1s: if lock unavailable, fall back to unlocked read.
-        if ! flock -s -w 1 9; then
-            echo "WARN: Override file locked (apply in progress). Showing latest available data." >&2
+    if _interspect_have_flock; then
+        (
+            # Shared lock allows concurrent reads, blocks on exclusive write lock.
+            # Timeout 1s: if lock unavailable, fall back to unlocked read.
+            if ! flock -s -w 1 9; then
+                echo "WARN: Override file locked (apply in progress). Showing latest available data." >&2
+            fi
+            _interspect_read_routing_overrides
+        ) 9>"$lockfile"
+    else
+        # mkdir fallback has no shared mode: briefly take the exclusive lock,
+        # degrading to an unlocked read after 1s (same posture as above).
+        if _interspect_mkdir_lock_acquire "$lockfile" 1; then
+            local rc=0
+            ( _interspect_read_routing_overrides ) || rc=$?
+            _interspect_mkdir_lock_release "$lockfile"
+            return $rc
         fi
+        echo "WARN: Override file locked (apply in progress). Showing latest available data." >&2
         _interspect_read_routing_overrides
-    ) 9>"$lockfile"
+    fi
 }
 
 # Write routing-overrides.json atomically (call inside _interspect_flock_git).
@@ -2829,9 +2846,38 @@ _interspect_get_canary_summary() {
 
 _INTERSPECT_GIT_LOCK_TIMEOUT=30
 
+# Hybrid locking (Sylveste-60q): flock(1) when the binary exists (Linux —
+# exact prior semantics), mkdir spin-lock fallback where it doesn't (macOS
+# ships no flock; every write path used to fail with exit 127 there).
+_interspect_have_flock() { command -v flock >/dev/null 2>&1; }
+
+# _interspect_mkdir_lock_acquire <lockfile> <timeout_secs>
+# Spin at 100ms until <lockfile>.d is created. A lock whose recorded holder
+# pid is dead is stolen (fd locks release on crash for free; mkdir locks
+# need the pid-liveness check to avoid wedging forever).
+_interspect_mkdir_lock_acquire() {
+    local lock_d="${1}.d" timeout="${2:-$_INTERSPECT_GIT_LOCK_TIMEOUT}"
+    local waited=0 max_ticks=$(( timeout * 10 )) holder
+    while ! mkdir "$lock_d" 2>/dev/null; do
+        holder="$(cat "${lock_d}/pid" 2>/dev/null || true)"
+        if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
+            rm -rf "$lock_d" 2>/dev/null || true
+            continue
+        fi
+        (( waited >= max_ticks )) && return 1
+        sleep 0.1
+        waited=$(( waited + 1 ))
+    done
+    echo "$$" > "${lock_d}/pid" 2>/dev/null || true
+    return 0
+}
+
+_interspect_mkdir_lock_release() { rm -rf "${1}.d" 2>/dev/null || true; }
+
 # Execute a command or shell function under the interspect git lock.
-# Accepts any command, including shell functions defined in this library
-# (functions run in the same sourced context, NOT as a subprocess).
+# Accepts any command, including shell functions defined in this library.
+# On BOTH paths the command runs in a subshell holding the lock, so it
+# communicates via files, stdout, and exit status only.
 # Usage: _interspect_flock_git git add <file>
 # Usage: _interspect_flock_git _interspect_write_overlay_locked arg1 arg2 ...
 _interspect_flock_git() {
@@ -2842,13 +2888,24 @@ _interspect_flock_git() {
 
     mkdir -p "$lockdir" 2>/dev/null || true
 
-    (
-        if ! flock -w "$_INTERSPECT_GIT_LOCK_TIMEOUT" 9; then
+    if _interspect_have_flock; then
+        (
+            if ! flock -w "$_INTERSPECT_GIT_LOCK_TIMEOUT" 9; then
+                echo "ERROR: interspect git lock timeout (${_INTERSPECT_GIT_LOCK_TIMEOUT}s). Another interspect session may be committing." >&2
+                return 1
+            fi
+            "$@"
+        ) 9>"$lockfile"
+    else
+        if ! _interspect_mkdir_lock_acquire "$lockfile" "$_INTERSPECT_GIT_LOCK_TIMEOUT"; then
             echo "ERROR: interspect git lock timeout (${_INTERSPECT_GIT_LOCK_TIMEOUT}s). Another interspect session may be committing." >&2
             return 1
         fi
-        "$@"
-    ) 9>"$lockfile"
+        local rc=0
+        ( "$@" ) || rc=$?
+        _interspect_mkdir_lock_release "$lockfile"
+        return $rc
+    fi
 }
 
 # ─── Secret Detection ──────────────────────────────────────────────────────
