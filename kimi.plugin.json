@@ -1,0 +1,38 @@
+{
+  "name": "interspect",
+  "version": "0.1.23",
+  "description": "Agent and skill performance profiler and routing optimizer. Collects evidence about flux-drive agent accuracy and skill quality, proposes routing overrides and skill overlays for underperformers, and monitors canary periods. Companion plugin for Clavain.",
+  "license": "MIT",
+  "keywords": [
+    "profiler",
+    "agent-routing",
+    "evidence",
+    "canary-monitoring",
+    "performance",
+    "optimization"
+  ],
+  "author": "mistakeknot",
+  "interface": {
+    "displayName": "interspect",
+    "shortDescription": "Agent and skill performance profiler and routing optimizer. Collects evidence about flux-drive agent accuracy and ski..."
+  },
+  "commands": "./commands/",
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "matcher": "startup|resume",
+      "command": "${KIMI_PLUGIN_ROOT}/hooks/interspect-session.sh"
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": "Agent",
+      "command": "${KIMI_PLUGIN_ROOT}/hooks/interspect-evidence.sh",
+      "timeout": 10
+    },
+    {
+      "event": "Stop",
+      "command": "${KIMI_PLUGIN_ROOT}/hooks/interspect-session-end.sh",
+      "timeout": 10
+    }
+  ]
+}
