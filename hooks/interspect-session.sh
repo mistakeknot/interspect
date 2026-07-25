@@ -112,7 +112,7 @@ if [[ -f "$OVERRIDES_FILE" ]]; then
     fi
     if (( PROPOSE_COUNT > 0 )); then
         PROPOSED_AGENTS=$(jq -r '[.overrides[] | select(.action == "propose") | .agent] | join(", ")' "$OVERRIDES_FILE" 2>/dev/null || echo "")
-        SUMMARY_PARTS+=("Interspect: ${PROPOSE_COUNT} pending proposal(s): ${PROPOSED_AGENTS}. Run /interspect:approve <agent> to apply.")
+        SUMMARY_PARTS+=("Interspect: ${PROPOSE_COUNT} pending proposal(s): ${PROPOSED_AGENTS}. Run /interspect:interspect-approve <agent> to apply.")
     fi
 fi
 
@@ -127,7 +127,7 @@ fi
 ALERT_COUNT=$(sqlite3 "$_INTERSPECT_DB" "SELECT COUNT(*) FROM canary WHERE status = 'alert';" 2>/dev/null || echo "0")
 if (( ALERT_COUNT > 0 )); then
     ALERT_AGENTS=$(sqlite3 -separator ', ' "$_INTERSPECT_DB" "SELECT group_id FROM canary WHERE status = 'alert';" 2>/dev/null || echo "")
-    SUMMARY_PARTS+=("WARNING: Canary alert for ${ALERT_AGENTS} — review quality may have degraded. Run /interspect:status or /interspect:revert <agent>.")
+    SUMMARY_PARTS+=("WARNING: Canary alert for ${ALERT_AGENTS} — review quality may have degraded. Run /interspect:interspect-status or /interspect:interspect-revert <agent>.")
 fi
 
 # Inject active overlays into session context (fail-open)

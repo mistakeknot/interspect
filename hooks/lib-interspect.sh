@@ -874,7 +874,7 @@ _interspect_get_overlay_eligible() {
 # Source of truth: Demarch CLAUDE.md "7 core review agents" — these 4 are the
 # structural subset (architecture, quality, safety, correctness) vs domain-specific
 # (user-product, performance, game-design).
-# When adding or reclassifying agents, update this list AND the /interspect:propose
+# When adding or reclassifying agents, update this list AND the /interspect:interspect-propose
 # command spec (os/clavain/commands/interspect-propose.md).
 # Args: $1=agent_name
 # Returns: 0 if cross-cutting, 1 if not
@@ -1111,8 +1111,8 @@ _interspect_apply_routing_override() {
     commit_sha=$(echo "$flock_output" | tail -1)
 
     echo "SUCCESS: Excluded ${agent}. Commit: ${commit_sha}"
-    echo "Canary monitoring active. Run /interspect:status after 5-10 sessions to check impact."
-    echo "To undo: /interspect:revert ${agent}"
+    echo "Canary monitoring active. Run /interspect:interspect-status after 5-10 sessions to check impact."
+    echo "To undo: /interspect:interspect-revert ${agent}"
     return 0
 }
 
@@ -1327,8 +1327,8 @@ _interspect_apply_propose() {
     commit_sha=$(echo "$flock_output" | tail -1)
 
     echo "SUCCESS: Proposed excluding ${agent}. Commit: ${commit_sha}"
-    echo "Visible in /interspect:status and flux-drive triage notes."
-    echo "To apply: /interspect:approve ${agent} (or re-run /interspect:propose)"
+    echo "Visible in /interspect:interspect-status and flux-drive triage notes."
+    echo "To apply: /interspect:interspect-approve ${agent} (or re-run /interspect:interspect-propose)"
     return 0
 }
 
@@ -1439,7 +1439,7 @@ _interspect_approve_override() {
                 echo "INFO: ${agent} is already excluded. Nothing to approve."
                 return 0
             fi
-            echo "ERROR: No proposal found for ${agent}. Run /interspect:propose first." >&2
+            echo "ERROR: No proposal found for ${agent}. Run /interspect:interspect-propose first." >&2
             return 1
         fi
     else
@@ -1488,8 +1488,8 @@ _interspect_approve_override() {
     commit_sha=$(echo "$flock_output" | tail -1)
 
     echo "SUCCESS: Approved exclusion for ${agent}. Commit: ${commit_sha}"
-    echo "Canary monitoring active. Run /interspect:status after 5-10 sessions to check impact."
-    echo "To undo: /interspect:revert ${agent}"
+    echo "Canary monitoring active. Run /interspect:interspect-status after 5-10 sessions to check impact."
+    echo "To undo: /interspect:interspect-revert ${agent}"
     return 0
 }
 
@@ -1668,7 +1668,7 @@ _interspect_revert_routing_override() {
 
     local commit_msg_file
     commit_msg_file=$(mktemp)
-    printf '[interspect] Revert routing override for %s\n\nReason: User requested revert via /interspect:revert\n' \
+    printf '[interspect] Revert routing override for %s\n\nReason: User requested revert via /interspect:interspect-revert\n' \
         "$agent" > "$commit_msg_file"
 
     # --- DB path for use inside flock ---
@@ -1990,7 +1990,7 @@ _interspect_should_auto_apply() {
 
 # Reset interspect state: wipe evidence, modifications, canary tables.
 # Preserves the sessions table and confidence.json (human-owned config).
-# Does NOT touch routing-overrides.json — use /interspect:revert for that.
+# Does NOT touch routing-overrides.json — use /interspect:interspect-revert for that.
 # Args: $1=scope ("evidence"|"canary"|"modifications"|"all")
 # Returns: 0 on success, 1 on failure
 _interspect_reset() {
@@ -4245,8 +4245,8 @@ _interspect_write_overlay() {
     local commit_sha
     commit_sha=$(echo "$flock_output" | tail -1)
     echo "SUCCESS: Overlay ${overlay_id} written for ${agent}. Commit: ${commit_sha}"
-    echo "Canary monitoring active. Run /interspect:status to check impact."
-    echo "To undo: /interspect:revert ${agent}"
+    echo "Canary monitoring active. Run /interspect:interspect-status to check impact."
+    echo "To undo: /interspect:interspect-revert ${agent}"
     return 0
 }
 
@@ -4393,7 +4393,7 @@ _interspect_disable_overlay() {
 
     local commit_msg_file
     commit_msg_file=$(mktemp)
-    printf '[interspect] Disable overlay %s for %s\n\nReason: User requested disable via /interspect:revert\n' \
+    printf '[interspect] Disable overlay %s for %s\n\nReason: User requested disable via /interspect:interspect-revert\n' \
         "$overlay_id" "$agent" > "$commit_msg_file"
 
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
@@ -4566,7 +4566,7 @@ _interspect_effectiveness_report() {
 }
 
 # _interspect_effectiveness_summary
-# Returns a one-line effectiveness summary for /interspect:status.
+# Returns a one-line effectiveness summary for /interspect:interspect-status.
 _interspect_effectiveness_summary() {
     local db
     db=$(_interspect_db_path) || { echo "Effectiveness: insufficient data"; return 0; }
@@ -4901,7 +4901,7 @@ _interspect_generate_tool_remediation() {
     done <<< "$patterns"
 
     content+=""$'\n'
-    content+="*Paste these rules into your CLAUDE.md under a 'Tool Usage' section. Re-run \`/interspect:tune tool:${src}\` to refresh.*"$'\n'
+    content+="*Paste these rules into your CLAUDE.md under a 'Tool Usage' section. Re-run \`/interspect:interspect-tune tool:${src}\` to refresh.*"$'\n'
 
     printf '%s' "$content"
 }
@@ -4938,7 +4938,7 @@ _interspect_compute_tool_baseline() {
 }
 
 # Count tool-pattern detections since a given timestamp, filtered to one source.
-# Used by /interspect:status to report canary recurrence.
+# Used by /interspect:interspect-status to report canary recurrence.
 # Args: $1=source, $2=since_ts (ISO 8601)
 # Output: integer count on stdout
 _interspect_count_tool_pattern_recurrence() {
@@ -5020,7 +5020,7 @@ _interspect_write_tool_remediation() {
 
     # Dedup: refuse to overwrite an existing remediation
     if [[ -f "$fullpath" ]]; then
-        echo "ERROR: Tool remediation ${overlay_id} already exists for ${source}. Disable existing first via /interspect:revert tool:${source}." >&2
+        echo "ERROR: Tool remediation ${overlay_id} already exists for ${source}. Disable existing first via /interspect:interspect-revert tool:${source}." >&2
         return 1
     fi
 
@@ -5096,8 +5096,8 @@ _interspect_write_tool_remediation() {
                 'tool-pattern remediation for ${e_source}', 'applied');" || true
 
     echo "SUCCESS: Tool remediation ${overlay_id} applied for ${source}. Commit: ${commit_sha}"
-    echo "Canary monitoring active. Run /interspect:status to check recurrence."
-    echo "To undo: /interspect:revert tool:${source}"
+    echo "Canary monitoring active. Run /interspect:interspect-status to check recurrence."
+    echo "To undo: /interspect:interspect-revert tool:${source}"
     return 0
 }
 
@@ -5508,7 +5508,7 @@ _interspect_write_skill_overlay() {
     [[ -z "$content" ]] && { echo "ERROR: Overlay content empty after sanitization" >&2; return 1; }
 
     if [[ -f "$overlay_path" ]]; then
-        echo "ERROR: Skill overlay already exists for ${skill}. Revert first: /interspect:revert --source-kind=skill ${skill}" >&2
+        echo "ERROR: Skill overlay already exists for ${skill}. Revert first: /interspect:interspect-revert --source-kind=skill ${skill}" >&2
         return 1
     fi
 
@@ -5547,7 +5547,7 @@ _interspect_write_skill_overlay() {
 
     echo "SUCCESS: Skill overlay applied for ${skill} (${action}). Overlay: ${overlay_path}"
     echo "Canary monitoring active until ${canary_until} (skill_canary_samples)."
-    echo "To undo: /interspect:revert --source-kind=skill ${skill}"
+    echo "To undo: /interspect:interspect-revert --source-kind=skill ${skill}"
     echo "modification_id=${mod_id}"
     return 0
 }
@@ -5568,8 +5568,8 @@ _interspect_propose_skill_tune() {
     fi
     _interspect_upsert_skill_override "$skill" "$action" "proposed" "$evidence_ids" "$content" "$mod_id" ""
 
-    echo "PROPOSED: skill tune for ${skill} (${action}). Review in /interspect:status --source-kind=skill."
-    echo "To apply: /interspect:approve --source-kind=skill ${skill}"
+    echo "PROPOSED: skill tune for ${skill} (${action}). Review in /interspect:interspect-status --source-kind=skill."
+    echo "To apply: /interspect:interspect-approve --source-kind=skill ${skill}"
     echo "modification_id=${mod_id}"
     return 0
 }

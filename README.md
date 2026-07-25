@@ -14,28 +14,28 @@ claude plugin update interspect@interagency-marketplace
 ```bash
 # Core workflow
 /interspect              # Analyze evidence, detect patterns, report readiness
-/interspect:status       # Overview — sessions, evidence, canaries
-/interspect:evidence     # Detailed agent evidence view
+/interspect:interspect-status       # Overview — sessions, evidence, canaries
+/interspect:interspect-evidence     # Detailed agent evidence view
 
 # Corrections
-/interspect:correction   # Record a manual correction event
+/interspect:interspect-correction   # Record a manual correction event
 
 # Routing overrides
-/interspect:propose      # Propose routing override from ready patterns
-/interspect:override     # Apply override directly
-/interspect:revert       # Revert override or disable overlays
-/interspect:approve      # Approve pending modification
+/interspect:interspect-propose      # Propose routing override from ready patterns
+/interspect:interspect-override     # Apply override directly
+/interspect:interspect-revert       # Revert override or disable overlays
+/interspect:interspect-approve      # Approve pending modification
 
 # Diagnostics
-/interspect:health       # Signal diagnostics
-/interspect:enable-autonomy   # Enable autonomous mode
-/interspect:disable-autonomy  # Disable autonomous mode
-/interspect:unblock      # Unblock stalled modification
+/interspect:interspect-health       # Signal diagnostics
+/interspect:interspect-enable-autonomy   # Enable autonomous mode
+/interspect:interspect-disable-autonomy  # Disable autonomous mode
+/interspect:interspect-unblock      # Unblock stalled modification
 
 # Skill calibration (add --source-kind=skill to most commands)
-/interspect:tune --source-kind=skill <plugin>:<skill>   # Generate a skill overlay
-/interspect:status --source-kind=skill                  # Skill calibration view
-/interspect:health --source-kind=skill                  # Skill signal coverage
+/interspect:interspect-tune --source-kind=skill <plugin>:<skill>   # Generate a skill overlay
+/interspect:interspect-status --source-kind=skill                  # Skill calibration view
+/interspect:interspect-health --source-kind=skill                  # Skill signal coverage
 ```
 
 ## How It Works
