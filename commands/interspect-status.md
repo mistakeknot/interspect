@@ -107,7 +107,7 @@ Present as:
   - Next action: {
       status == "active": "Monitoring in progress"
       status == "passed": "Override confirmed safe. No action needed."
-      status == "alert": "Review quality may have degraded. Consider /interspect:revert {agent}."
+      status == "alert": "Review quality may have degraded. Consider /interspect:interspect-revert {agent}."
       status == "expired_unused": "Window expired without usage. Override remains."
       status == "reverted": "Override was reverted. Canary closed."
     }
@@ -158,7 +158,7 @@ Present routing overrides with actionable context:
   - if agent not in roster, flag as "orphaned"
   - show next-action hint}
 
-{if override_count >= 3: "Warning: High exclusion rate (N agents). Review agent roster or run `/interspect:propose` to check pattern health."}
+{if override_count >= 3: "Warning: High exclusion rate (N agents). Review agent roster or run `/interspect:interspect-propose` to check pattern health."}
 
 > You can also hand-edit `.claude/routing-overrides.json` — set `"created_by": "human"` for custom overrides.
 ```
@@ -213,14 +213,14 @@ Present:
   - Canary column: "monitoring", "passed", "alert", or "none"
   - Next Action:
     canary == "active": "Monitoring ({uses}/{window} uses)"
-    canary == "alert": "Review — run /interspect:revert {agent}"
+    canary == "alert": "Review — run /interspect:interspect-revert {agent}"
     canary == "passed": "Stable"
     canary == "none": "No canary (manual overlay?)"
   - Token budget warning if token_est > 400: " ⚠ near budget (500)"
 }
 
 {if TOTAL_ACTIVE == 0 and OVERLAY_DIR exists:
-  "No active overlays. Use `/interspect:propose` to detect tuning-eligible patterns."}
+  "No active overlays. Use `/interspect:interspect-propose` to detect tuning-eligible patterns."}
 {if not -d OVERLAY_DIR:
   "Overlays directory not initialized. Run any interspect command to create it."}
 ```
@@ -270,11 +270,11 @@ will auto-revert it once it clears the >20%/signal AND >10%/composite trigger.
 
 ```
 Run `/interspect` for pattern analysis.
-Run `/interspect:evidence <agent>` for detailed agent evidence.
-Run `/interspect:health` for signal diagnostics.
-Run `/interspect:propose` for routing override or overlay proposals.
-Run `/interspect:revert <agent>` to remove an override or disable overlays.
-Run `/interspect:status --source-kind=skill` for the skill-calibration view.
+Run `/interspect:interspect-evidence <agent>` for detailed agent evidence.
+Run `/interspect:interspect-health` for signal diagnostics.
+Run `/interspect:interspect-propose` for routing override or overlay proposals.
+Run `/interspect:interspect-revert <agent>` to remove an override or disable overlays.
+Run `/interspect:interspect-status --source-kind=skill` for the skill-calibration view.
 ```
 
 ## Detailed View (agent name provided)

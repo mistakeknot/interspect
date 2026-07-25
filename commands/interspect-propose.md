@@ -54,10 +54,10 @@ The proposal for cross-cutting agents requires the user to select "Yes, exclude 
 Show the pattern analysis table first (same as `/interspect` output), then present all eligible proposals together for batch decision-making.
 
 If no eligible patterns exist and no evidence exists at all:
-> "No patterns detected yet. Record corrections via `/interspect:correction` when agents produce irrelevant findings. Interspect learns from your overrides."
+> "No patterns detected yet. Record corrections via `/interspect:interspect-correction` when agents produce irrelevant findings. Interspect learns from your overrides."
 
 If patterns exist but none are routing-eligible:
-> "Patterns detected but not routing-eligible. Routing overrides require >=80% of corrections to be 'agent_wrong'. Keep recording corrections via `/interspect:correction`."
+> "Patterns detected but not routing-eligible. Routing overrides require >=80% of corrections to be 'agent_wrong'. Keep recording corrections via `/interspect:interspect-correction`."
 
 If eligible patterns exist, show a summary table first:
 
@@ -206,5 +206,5 @@ For each skill with ≥10 invocations whose worst signal shows a deficit (see th
 3. Propose it: `_interspect_propose_skill_tune "$skill" "$ACTION" "$CONTENT" "$EVIDENCE_IDS"`
 
 Safe-list actions (`tighten_description`, `when_to_use_add`) auto-apply under
-`/interspect:enable-autonomy` via `/interspect:tune --source-kind=skill`; body
+`/interspect:interspect-enable-autonomy` via `/interspect:interspect-tune --source-kind=skill`; body
 rewrites and availability changes remain propose-only.

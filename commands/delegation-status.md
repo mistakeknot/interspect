@@ -2,6 +2,7 @@
 name: delegation-status
 description: Show delegation routing status — pass rates, recent outcomes, calibration state
 argument-hint: ""
+disable-model-invocation: true
 ---
 
 # Delegation Status

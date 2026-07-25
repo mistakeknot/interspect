@@ -2,6 +2,7 @@
 name: calibrate-audit
 description: Self-audit interspect calibration — compare current ranking vs a snapshot from N days ago, flag drift
 argument-hint: "[--window-days=90] [--hit-rate-delta=0.2] [--rank-delta=5] [--min-correlation=0.7]"
+disable-model-invocation: true
 ---
 
 # Interspect Calibrate-Audit

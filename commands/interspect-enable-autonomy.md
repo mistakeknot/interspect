@@ -2,11 +2,12 @@
 name: interspect-enable-autonomy
 description: Enable autonomous mode — low/medium-risk overrides auto-apply with canary monitoring
 argument-hint: ""
+disable-model-invocation: true
 ---
 
 # Interspect: Enable Autonomy
 
-Enable autonomous mode for Interspect. When enabled, routing overrides (Type 2) that meet all confidence thresholds will auto-apply with canary monitoring instead of requiring explicit `/interspect:approve`.
+Enable autonomous mode for Interspect. When enabled, routing overrides (Type 2) that meet all confidence thresholds will auto-apply with canary monitoring instead of requiring explicit `/interspect:interspect-approve`.
 
 Prompt tuning overlays (Type 3) always require propose mode regardless of this flag.
 
@@ -34,7 +35,7 @@ CURRENT_STATE="${_INTERSPECT_AUTONOMY:-false}"
 ```
 
 If already enabled:
-> "Autonomous mode is already enabled. Routing overrides auto-apply with canary monitoring. Run `/interspect:disable-autonomy` to switch back to propose mode."
+> "Autonomous mode is already enabled. Routing overrides auto-apply with canary monitoring. Run `/interspect:interspect-disable-autonomy` to switch back to propose mode."
 
 ## Confirm
 
@@ -66,13 +67,13 @@ _interspect_set_autonomy "true"
 Autonomous mode **enabled**.
 
 What changes:
-- `/interspect:propose` will auto-apply routing overrides that meet all confidence thresholds
+- `/interspect:interspect-propose` will auto-apply routing overrides that meet all confidence thresholds
 - Canary monitoring protects against quality regression
 - Circuit breaker prevents repeated bad overrides
-- Prompt tuning overlays still require `/interspect:approve`
+- Prompt tuning overlays still require `/interspect:interspect-approve`
 
 Safety controls:
-- Run `/interspect:status` to monitor active canaries
-- Run `/interspect:revert <agent>` to undo any override
-- Run `/interspect:disable-autonomy` to return to propose mode
+- Run `/interspect:interspect-status` to monitor active canaries
+- Run `/interspect:interspect-revert <agent>` to undo any override
+- Run `/interspect:interspect-disable-autonomy` to return to propose mode
 ```

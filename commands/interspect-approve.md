@@ -35,7 +35,7 @@ FILEPATH="${FLUX_ROUTING_OVERRIDES_PATH:-.claude/routing-overrides.json}"
 FULLPATH="${ROOT}/${FILEPATH}"
 
 if [[ ! -f "$FULLPATH" ]]; then
-    echo "No routing-overrides.json found. Run /interspect:propose to detect eligible patterns."
+    echo "No routing-overrides.json found. Run /interspect:interspect-propose to detect eligible patterns."
     # Stop here
 fi
 
@@ -48,7 +48,7 @@ PROPOSAL_COUNT=$(echo "$PROPOSALS" | jq 'length')
 If no argument was provided (`<approve_target>` is empty):
 
 If `PROPOSAL_COUNT == 0`:
-> "No pending proposals. Run `/interspect:propose` to detect eligible patterns."
+> "No pending proposals. Run `/interspect:interspect-propose` to detect eligible patterns."
 
 If proposals exist, show a summary table:
 
@@ -96,7 +96,7 @@ Approved N agent(s):
 - {agent_2}: commit {sha_2}
 
 Canary monitoring active for all approved overrides.
-Run /interspect:status after 5-10 sessions to check impact.
+Run /interspect:interspect-status after 5-10 sessions to check impact.
 ```
 
 ## With Argument: Single Approve
@@ -119,7 +119,7 @@ if ! echo "$PROPOSALS" | jq -e --arg agent "$AGENT" '.[] | select(.agent == $age
     if jq -e --arg agent "$AGENT" '.overrides[] | select(.agent == $agent and .action == "exclude")' "$FULLPATH" >/dev/null 2>&1; then
         echo "${AGENT} is already excluded. Nothing to approve."
     else
-        echo "No proposal found for ${AGENT}. Run /interspect:propose first."
+        echo "No proposal found for ${AGENT}. Run /interspect:interspect-propose first."
     fi
     # Stop here
 fi
@@ -165,7 +165,7 @@ Promote a proposed `skill_tune` entry to active — this writes the overlay file
 SKILL="<skill>"   # e.g. clavain:work
 PENDING=$(_interspect_read_routing_overrides | jq -c --arg s "$SKILL" '.overrides[] | select(.kind=="skill_tune" and .skill==$s and .state=="proposed")')
 if [[ -z "$PENDING" ]]; then
-    echo "No pending skill_tune proposal for ${SKILL}. Run /interspect:propose --source-kind=skill."
+    echo "No pending skill_tune proposal for ${SKILL}. Run /interspect:interspect-propose --source-kind=skill."
 else
     ACTION=$(echo "$PENDING" | jq -r '.action')
     PATCH=$(echo "$PENDING" | jq -r '.patch')

@@ -99,5 +99,5 @@ Recorded correction for **{agent_name}**: {description}
 Reason: {override_reason}
 Total evidence for {agent_name}: {count} events
 
-Run /interspect:evidence {agent_name} to see all evidence for this agent.
+Run /interspect:interspect-evidence {agent_name} to see all evidence for this agent.
 ```

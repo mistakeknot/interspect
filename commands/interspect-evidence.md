@@ -2,6 +2,7 @@
 name: interspect-evidence
 description: Detailed evidence view for a specific agent — event breakdown, timeline, recent events
 argument-hint: "[agent-name]"
+disable-model-invocation: true
 ---
 
 # Interspect Evidence
@@ -54,7 +55,7 @@ Present as:
 |-------|--------|----------|----------|-----------|
 {agent rows}
 
-Run `/interspect:evidence <agent-name>` for detailed view.
+Run `/interspect:interspect-evidence <agent-name>` for detailed view.
 ```
 
 ## Agent Specified — Detailed View
@@ -139,4 +140,4 @@ Ready/Growing/Emerging with specific criteria met/unmet}
 ## Edge Cases
 
 - **Unknown agent:** "No evidence found for '{agent}'. Available agents: {list from overview query}."
-- **Empty database:** "No evidence collected yet. Run `/interspect:correction <agent> <description>` to start."
+- **Empty database:** "No evidence collected yet. Run `/interspect:interspect-correction <agent> <description>` to start."

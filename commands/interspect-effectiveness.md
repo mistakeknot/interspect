@@ -2,6 +2,7 @@
 name: interspect-effectiveness
 description: Show routing effectiveness metrics — override rate trends, per-agent impact, and actionable recommendations
 argument-hint: "[--window=30]"
+disable-model-invocation: true
 ---
 
 # Interspect Effectiveness
@@ -72,8 +73,8 @@ Compute trend by comparing current override_rate with prior:
 - No prior data: `— new`
 
 ### 5. Recommendations
-- Agent with override_rate > 50%: suggest `/interspect:propose`
-- Agent with declining trend (rate up >10%): warn and suggest `/interspect:evidence <agent>`
+- Agent with override_rate > 50%: suggest `/interspect:interspect-propose`
+- Agent with declining trend (rate up >10%): warn and suggest `/interspect:interspect-evidence <agent>`
 - All stable/improving: "Routing is healthy"
 
 ### 6. Global Mode (--global)
@@ -111,6 +112,6 @@ Skill Calibration — Last ${WINDOW} days
 ```
 
 Recommendations:
-- Score < 0.5 with a degrading Δ: suggest `/interspect:tune --source-kind=skill <skill>`
+- Score < 0.5 with a degrading Δ: suggest `/interspect:interspect-tune --source-kind=skill <skill>`
 - Skill with an active overlay whose canary mean Δ is negative: warn it may auto-revert
 - All stable/improving: "Skill calibration is healthy"

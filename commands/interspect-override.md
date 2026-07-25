@@ -2,6 +2,7 @@
 name: interspect-override
 description: Manually exclude an agent from flux-drive triage — bypasses evidence requirements
 argument-hint: "<agent-name> [reason]"
+disable-model-invocation: true
 ---
 
 # Interspect Manual Override
@@ -75,7 +76,7 @@ done
 ```
 
 If all agents are already excluded:
-> "All review agents are already excluded. Run `/interspect:status` to review overrides."
+> "All review agents are already excluded. Run `/interspect:interspect-status` to review overrides."
 
 Present via **AskUserQuestion**:
 
@@ -99,7 +100,7 @@ Check if already excluded:
 
 ```bash
 if _interspect_override_exists "$AGENT"; then
-    echo "${AGENT} is already excluded. Run /interspect:status to see overrides."
+    echo "${AGENT} is already excluded. Run /interspect:interspect-status to see overrides."
     # Stop here
 fi
 ```
@@ -175,8 +176,8 @@ Excluded **{AGENT}** from flux-drive reviews.
 - Scope: {global | file patterns | domain}
 - Created by: human (manual override)
 
-Canary monitoring active. Run `/interspect:status` after 5-10 sessions to verify.
-To undo: `/interspect:revert {AGENT}`
+Canary monitoring active. Run `/interspect:interspect-status` after 5-10 sessions to verify.
+To undo: `/interspect:interspect-revert {AGENT}`
 
-> Manual overrides bypass evidence requirements. Interspect will still collect evidence for this agent — if the evidence later shows the agent is useful, `/interspect:status` will note the discrepancy.
+> Manual overrides bypass evidence requirements. Interspect will still collect evidence for this agent — if the evidence later shows the agent is useful, `/interspect:interspect-status` will note the discrepancy.
 ```

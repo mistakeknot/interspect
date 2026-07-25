@@ -116,7 +116,7 @@ Options:
 
 If "Blacklist permanently":
 ```bash
-_interspect_blacklist_pattern "$AGENT" "User reverted via /interspect:revert"
+_interspect_blacklist_pattern "$AGENT" "User reverted via /interspect:interspect-revert"
 ```
 
 ## Report (Routing Override)
@@ -124,7 +124,7 @@ _interspect_blacklist_pattern "$AGENT" "User reverted via /interspect:revert"
 ```
 Reverted routing override for **{agent}**.
 {if blacklisted: "Pattern blacklisted — interspect won't re-propose this exclusion.
-Run `/interspect:unblock {agent}` to allow future proposals."}
+Run `/interspect:interspect-unblock {agent}` to allow future proposals."}
 {if not blacklisted: "Interspect may re-propose this exclusion if evidence warrants it."}
 ```
 
@@ -277,5 +277,5 @@ on an auto-revert (a >20%/signal AND >10%/composite regression).
 ```
 Reverted skill overlay for **{skill}**.
 The overlay file was removed; the skill loader falls back to the source SKILL.md.
-Re-tune with `/interspect:tune --source-kind=skill {skill}` once new signals accumulate.
+Re-tune with `/interspect:interspect-tune --source-kind=skill {skill}` once new signals accumulate.
 ```

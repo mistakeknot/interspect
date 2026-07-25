@@ -2,6 +2,7 @@
 name: interspect-reset
 description: Nuclear reset — revert all active modifications, clear evidence, archive data
 argument-hint: "[scope: all|evidence|canary|modifications]"
+disable-model-invocation: true
 ---
 
 # Interspect Reset
@@ -53,7 +54,7 @@ Data that will be cleared:
 
 Preserved (not affected):
 - Sessions: {session_count} records
-- routing-overrides.json (revert separately with /interspect:revert)
+- routing-overrides.json (revert separately with /interspect:interspect-revert)
 - Overlay files in .clavain/interspect/overlays/
 ```
 
@@ -105,5 +106,5 @@ Cleared: {scope description}
 {if overrides reverted: "Reverted: {override_count} routing override(s)"}
 
 Interspect will begin collecting fresh evidence from the next session.
-Run `/interspect:status` to verify clean state.
+Run `/interspect:interspect-status` to verify clean state.
 ```

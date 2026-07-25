@@ -2,6 +2,7 @@
 name: interspect-unblock
 description: Remove a pattern from the routing override blacklist
 argument-hint: "<agent-name>"
+disable-model-invocation: true
 ---
 
 # Interspect Unblock

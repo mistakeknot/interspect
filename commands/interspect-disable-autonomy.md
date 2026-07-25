@@ -2,11 +2,12 @@
 name: interspect-disable-autonomy
 description: Disable autonomous mode — all overrides require explicit approval
 argument-hint: ""
+disable-model-invocation: true
 ---
 
 # Interspect: Disable Autonomy
 
-Return to propose mode (default). All future routing overrides will require explicit approval via `/interspect:approve`.
+Return to propose mode (default). All future routing overrides will require explicit approval via `/interspect:interspect-approve`.
 
 Existing overrides are not affected — they remain active with their canary monitoring.
 
@@ -34,7 +35,7 @@ CURRENT_STATE="${_INTERSPECT_AUTONOMY:-false}"
 ```
 
 If already disabled:
-> "Propose mode is already active (autonomy disabled). Overrides require explicit approval via `/interspect:approve`."
+> "Propose mode is already active (autonomy disabled). Overrides require explicit approval via `/interspect:interspect-approve`."
 
 ## Apply
 
@@ -59,8 +60,8 @@ Note: `--revert-all` is manual-only. The system breaker auto-disable only stops 
 ```
 Autonomous mode **disabled**. Returned to propose mode.
 
-- Future routing overrides will require `/interspect:approve`
+- Future routing overrides will require `/interspect:interspect-approve`
 - Existing overrides and canaries are unaffected
-- Run `/interspect:enable-autonomy` to re-enable
-- Run `/interspect:disable-autonomy --revert-all --confirm` to also revert all active overrides
+- Run `/interspect:interspect-enable-autonomy` to re-enable
+- Run `/interspect:interspect-disable-autonomy --revert-all --confirm` to also revert all active overrides
 ```

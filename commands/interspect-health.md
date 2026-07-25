@@ -1,6 +1,7 @@
 ---
 name: interspect-health
 description: Signal collection diagnostics — check evidence channels, dark sessions, DB health
+disable-model-invocation: true
 ---
 
 # Interspect Health
@@ -100,11 +101,11 @@ INTEGRITY=$(sqlite3 "$DB" "PRAGMA integrity_check;" | head -1)
 
 ### Recommendations
 {Generate recommendations based on findings:
-- If INACTIVE channels: "Run /interspect:correction to generate correction signals"
+- If INACTIVE channels: "Run /interspect:interspect-correction to generate correction signals"
 - If many dark sessions: "Session end hook may not be firing — check hooks.json registration"
-- If no dispatch events: "Task tool PostToolUse matcher may not be supported — this is expected and acceptable. /interspect:correction is the primary evidence source."
+- If no dispatch events: "Task tool PostToolUse matcher may not be supported — this is expected and acceptable. /interspect:interspect-correction is the primary evidence source."
 - If DB integrity fails: "Database corruption detected — consider deleting and re-creating"
-- If all OK: "All channels healthy. Continue using /interspect:correction to build evidence."}
+- If all OK: "All channels healthy. Continue using /interspect:interspect-correction to build evidence."}
 ```
 
 ## Skill Signal Coverage (`--source-kind=skill`)
@@ -157,6 +158,6 @@ Recommendations:
 
 ## Edge Cases
 
-- **No database:** Report "Interspect database not initialized. It will be created automatically on next session start or when running `/interspect:correction`."
+- **No database:** Report "Interspect database not initialized. It will be created automatically on next session start or when running `/interspect:interspect-correction`."
 - **All channels inactive:** This is normal for a fresh install. Guide the user to generate first evidence.
 - **No skill signals:** Skill calibration needs the collectors to have run at least once after a tracked skill was invoked; this is normal pre-adoption.

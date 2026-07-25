@@ -7,7 +7,7 @@ description: Analyze Interspect evidence — detect patterns, classify by counti
 
 Main analysis command. Queries the evidence store, detects patterns, classifies by counting-rule thresholds, and presents a structured report.
 
-**Phase 2: Evidence + Proposals** — routing overrides can be proposed and applied via `/interspect:propose`.
+**Phase 2: Evidence + Proposals** — routing overrides can be proposed and applied via `/interspect:interspect-propose`.
 
 ## Locate Library
 
@@ -82,7 +82,7 @@ Present the analysis as:
 ```
 ## Interspect Analysis Report
 
-**Phase 2: Evidence + Proposals** — routing overrides available via `/interspect:propose`.
+**Phase 2: Evidence + Proposals** — routing overrides available via `/interspect:interspect-propose`.
 
 ### Ready Patterns (eligible for Phase 2 proposals)
 
@@ -114,8 +114,8 @@ Present the analysis as:
 - Dark sessions: {dark}
 
 ### Recommendations
-{based on data: suggest running /interspect:correction if few overrides,
-suggest checking /interspect:health if evidence collection looks sparse}
+{based on data: suggest running /interspect:interspect-correction if few overrides,
+suggest checking /interspect:interspect-health if evidence collection looks sparse}
 ```
 
 ## Tier 2: Routing Override Eligibility Summary
@@ -128,14 +128,14 @@ After showing the analysis report, check for routing-eligible patterns and displ
 2. Display a footer (DO NOT present proposals or AskUserQuestion from this command):
 
 If routing-eligible patterns exist:
-> "N pattern(s) eligible for routing overrides. Run `/interspect:propose` to review exclusion proposals."
+> "N pattern(s) eligible for routing overrides. Run `/interspect:interspect-propose` to review exclusion proposals."
 
 Progress display for growing patterns:
 - "fd-game-design: 3/5 events, 2/3 sessions (needs 1 more session)"
-- "Keep using `/interspect:correction` when this agent is wrong. Or exclude manually via hand-editing `.claude/routing-overrides.json`."
+- "Keep using `/interspect:interspect-correction` when this agent is wrong. Or exclude manually via hand-editing `.claude/routing-overrides.json`."
 
 ## Edge Cases
 
-- **Empty database:** Report "No evidence collected yet. Run `/interspect:correction <agent> <description>` to record your first correction, or wait for evidence hooks to collect data."
-- **Only dispatch events:** Report "Evidence consists only of agent dispatch tracking. Run `/interspect:correction` to add correction signals for pattern analysis."
+- **Empty database:** Report "No evidence collected yet. Run `/interspect:interspect-correction <agent> <description>` to record your first correction, or wait for evidence hooks to collect data."
+- **Only dispatch events:** Report "Evidence consists only of agent dispatch tracking. Run `/interspect:interspect-correction` to add correction signals for pattern analysis."
 - **No patterns meeting any threshold:** Report all as emerging, with a note about how many more events/sessions are needed.

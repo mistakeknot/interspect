@@ -2,6 +2,7 @@
 name: interspect-tune
 description: Generate a prompt tuning overlay for an agent, a CLAUDE.md remediation for a tool source, or a skill overlay for a skill, from accumulated evidence
 argument-hint: "<agent-name> | tool:<tool-source> | --source-kind=skill <plugin>:<skill> [--action=<a>] [--dry-run] [--apply]"
+disable-model-invocation: true
 ---
 
 # Interspect Tune
@@ -34,9 +35,9 @@ DB=$(_interspect_db_path)
 
 Extract the argument from `<tune_target>`. If empty, show usage:
 ```
-Usage: /interspect:tune <agent-name>                         # agent prompt overlay
-       /interspect:tune tool:<tool-source>                   # CLAUDE.md remediation
-       /interspect:tune --source-kind=skill <plugin>:<skill> # skill overlay
+Usage: /interspect:interspect-tune <agent-name>                         # agent prompt overlay
+       /interspect:interspect-tune tool:<tool-source>                   # CLAUDE.md remediation
+       /interspect:interspect-tune --source-kind=skill <plugin>:<skill> # skill overlay
               [--action=tighten_description|when_to_use_add|skill_md_body_rewrite|availability]
               [--dry-run] [--apply]
 ```
@@ -53,7 +54,7 @@ Determine `KIND`:
 ```bash
 CORRECTION_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE (source = '$TARGET' OR source LIKE '%$TARGET') AND source_kind = 'agent' AND event = 'override';" 2>/dev/null || echo "0")
 ```
-If 0: "No corrections found for agent $TARGET. Run `/interspect:correction $TARGET` first."
+If 0: "No corrections found for agent $TARGET. Run `/interspect:interspect-correction $TARGET` first."
 Check `.clavain/interspect/overlays/$TARGET/tuning.md`; if it exists, ask "Regenerate?".
 
 ### Tool mode (KIND=tool)
@@ -155,7 +156,7 @@ Report:
 - Action chosen and whether it auto-applied or was proposed
 - Overlay path (`~/.claude/skill-overlays/$TARGET.md`) when applied; `modification_id`
 - Canary window (20 invocations / 14 days; per-signal deltas in `skill_canary_samples`)
-- Next: "`/interspect:status --source-kind=skill` to monitor, `/interspect:revert --source-kind=skill $TARGET` to undo"
+- Next: "`/interspect:interspect-status --source-kind=skill` to monitor, `/interspect:interspect-revert --source-kind=skill $TARGET` to undo"
 
 ### Agent mode
 

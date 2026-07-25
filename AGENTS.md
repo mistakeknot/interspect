@@ -13,7 +13,7 @@
 | Repo | `https://github.com/mistakeknot/interspect` |
 | Namespace | `interspect:` |
 | Manifest | `.claude-plugin/plugin.json` |
-| Components | 0 skills, 12 commands, 0 agents, 3 hooks (SessionStart + PostToolUse + Stop), 1 script |
+| Components | 0 skills, 18 commands (7 model-invocable, 11 user-only), 0 agents, 3 hooks (SessionStart + PostToolUse + Stop), 1 script |
 | License | MIT |
 
 ### Release workflow
@@ -27,10 +27,10 @@ scripts/bump-version.sh <version>   # bump, commit, push, publish
 
 **Problem:** Flux-drive agents have variable quality per domain. Bad routing wastes tokens and produces poor reviews. No evidence-based way to tune agent selection.
 
-**Solution:** Three hooks collect evidence passively. 12 commands provide analysis, override management, and canary monitoring. Evidence stored in SQLite; routing overrides written to `.claude/routing-overrides.json`.
+**Solution:** Three hooks collect evidence passively. 18 commands provide analysis, override management, and canary monitoring. Evidence stored in SQLite; routing overrides written to `.claude/routing-overrides.json`.
 
 **Plugin Type:** Claude Code command + hook plugin (Clavain companion)
-**Current Version:** 0.1.5
+**Current Version:** see `.claude-plugin/plugin.json` (this line used to hardcode a version and rotted 18 releases behind)
 
 ## Architecture
 
@@ -38,7 +38,7 @@ scripts/bump-version.sh <version>   # bump, commit, push, publish
 interspect/
 ├── .claude-plugin/
 │   └── plugin.json               # Metadata only (commands/hooks via convention)
-├── commands/
+├── commands/                     # 18 total — see § Commands for the full index
 │   ├── interspect.md             # Main analysis — detect patterns, classify, report
 │   ├── interspect-status.md      # Overview — sessions, evidence, canaries
 │   ├── interspect-evidence.md    # Detailed agent evidence view
@@ -48,6 +48,12 @@ interspect/
 │   ├── interspect-revert.md      # Revert override or disable overlays
 │   ├── interspect-approve.md     # Approve pending modification
 │   ├── interspect-health.md      # Signal diagnostics
+│   ├── interspect-tune.md        # Prompt/CLAUDE.md/skill overlay generation
+│   ├── interspect-effectiveness.md  # Routing effectiveness metrics
+│   ├── interspect-reset.md       # Nuclear reset
+│   ├── calibrate.md              # Compute agent scores + delegation stats
+│   ├── calibrate-audit.md        # Calibration drift self-audit
+│   ├── delegation-status.md      # Delegation routing status
 │   ├── interspect-enable-autonomy.md
 │   ├── interspect-disable-autonomy.md
 │   └── interspect-unblock.md     # Unblock stalled modification
@@ -69,20 +75,48 @@ interspect/
 
 ## Commands
 
+All 18 commands are user-invocable by typing them. Rows marked ⌨ carry
+`disable-model-invocation: true`: Claude will not reach for them on its own, and
+their descriptions are not loaded into context every session. Everything else is
+identical — they run exactly the same when you type them.
+
+Note the namespace: most files are named `interspect-*`, so the invocation is
+`/interspect:interspect-status`, not `/interspect:status`. Only `interspect`,
+`calibrate`, `calibrate-audit`, and `delegation-status` take the short form.
+
+### Model-invocable (7)
+
+These stay advertised because a hook or a shipped skill nudges toward them at
+runtime — demoting them would break the nudge.
+
+| Command | Purpose | Nudged by |
+|---------|---------|-----------|
+| `/interspect:interspect` | Analyze evidence — detect patterns, classify by counting-rule thresholds | main entry |
+| `/interspect:interspect-status` | Overview — session counts, evidence stats, active canaries, modifications | canary alert (SessionStart) |
+| `/interspect:interspect-revert` | Revert a routing override, an agent overlay, or a tool remediation | canary alert (SessionStart) |
+| `/interspect:interspect-approve` | Promote pending proposals to active routing overrides | pending-proposal summary |
+| `/interspect:interspect-propose` | Detect routing-eligible patterns and propose agent exclusions | `lib-interspect.sh` |
+| `/interspect:interspect-correction` | Record that an agent got something wrong | interflux `flux-engine` skill |
+| `/interspect:calibrate` | Compute agent scores and delegation stats; write routing + delegation calibration | `fd-eval-calibration-metrics` |
+
+### User-invocable only (11) ⌨
+
+Operator verbs — you reach for these deliberately; Claude has no reason to pick
+them mid-task.
+
 | Command | Purpose |
 |---------|---------|
-| `/interspect` | Analyze evidence — detect patterns, classify by counting-rule thresholds |
-| `/interspect:status` | Overview — session counts, evidence stats, active canaries |
-| `/interspect:evidence` | Detailed agent evidence view |
-| `/interspect:correction` | Record a manual correction event |
-| `/interspect:propose` | Propose routing override from ready patterns |
-| `/interspect:override` | Apply a routing override directly |
-| `/interspect:revert` | Revert override or disable overlays |
-| `/interspect:approve` | Approve pending modification |
-| `/interspect:health` | Signal diagnostics |
-| `/interspect:enable-autonomy` | Enable autonomous modification mode |
-| `/interspect:disable-autonomy` | Disable autonomous modification mode |
-| `/interspect:unblock` | Unblock a stalled modification |
+| `/interspect:interspect-tune` ⌨ | Generate a prompt tuning overlay for an agent, a CLAUDE.md remediation for a tool source, or a skill overlay |
+| `/interspect:interspect-effectiveness` ⌨ | Routing effectiveness — override rate trends, per-agent impact, recommendations |
+| `/interspect:interspect-evidence` ⌨ | Detailed evidence for one agent — event breakdown, timeline, recent events |
+| `/interspect:interspect-health` ⌨ | Signal collection diagnostics — evidence channels, dark sessions, DB health |
+| `/interspect:interspect-override` ⌨ | Manually exclude an agent from flux-drive triage, bypassing evidence requirements |
+| `/interspect:interspect-unblock` ⌨ | Remove a pattern from the routing override blacklist |
+| `/interspect:interspect-enable-autonomy` ⌨ | Enable autonomous mode — low/medium-risk overrides auto-apply with canary monitoring |
+| `/interspect:interspect-disable-autonomy` ⌨ | Disable autonomous mode — all overrides require explicit approval |
+| `/interspect:interspect-reset` ⌨ | Nuclear reset — revert all active modifications, clear evidence, archive data |
+| `/interspect:calibrate-audit` ⌨ | Self-audit calibration — compare current ranking vs an N-day-old snapshot, flag drift |
+| `/interspect:delegation-status` ⌨ | Delegation routing status — pass rates, recent outcomes, calibration state |
 
 ## Hooks
 
@@ -115,10 +149,10 @@ Generalizes the routing loop from `source_kind='agent'` to skills. Pipeline:
 `~/.claude/audit.log` (tool=Skill) → `ingest-skill-audit.py` → `evidence(source_kind='skill')`
 → four collectors (`scripts/signals/collect_{tokens,bead_close,no_redirect,error}.py`) → `skill_signals`
 → `infer-skill-goals.py` (Haiku one-shot, `skill_goals`) → `score-skills.py` (weighted composite, `skills` block in `routing-calibration.json`, `schema_version:3`)
-→ `/interspect:tune --source-kind=skill` → overlay at `~/.claude/skill-overlays/` + `kind:"skill_tune"` override → canary → promote/auto-revert.
+→ `/interspect:interspect-tune --source-kind=skill` → overlay at `~/.claude/skill-overlays/` + `kind:"skill_tune"` override → canary → promote/auto-revert.
 
 - **Signal→goal mapping:** `tokens→speed`, `error→precision`, `no_redirect→precision` (0.5×), `bead_close→completeness`.
-- **Per-action autonomy:** `tighten_description` / `when_to_use_add` auto-apply under `/interspect:enable-autonomy`; `skill_md_body_rewrite` / `availability` are propose-only (safe-list in `skill-autonomy-policy.json`).
+- **Per-action autonomy:** `tighten_description` / `when_to_use_add` auto-apply under `/interspect:interspect-enable-autonomy`; `skill_md_body_rewrite` / `availability` are propose-only (safe-list in `skill-autonomy-policy.json`).
 - All `/interspect:{tune,propose,approve,revert,status,effectiveness,health}` accept `--source-kind=skill`.
 - Optional `intermesh.route.v1` receipts enter the same evidence table as `event='skill_route'` decision rows. They carry no synthetic success signal; `route_id` is retained for later outcome attachment.
 
@@ -156,7 +190,7 @@ Evidence and calibration data (C2) follow intermem's decay model:
 |-----------|-------------|------------|------------|--------|
 | Evidence records | 90 days | Excluded from analysis after 90d | N/A | Old evidence not counted in pattern detection |
 | Canary windows | 14 days | Window expires after 14d or 20 uses | N/A | Auto-evaluated at expiry |
-| Routing overrides | None | Permanent until reverted | N/A | Manual revert via `/interspect:revert` |
+| Routing overrides | None | Permanent until reverted | N/A | Manual revert via `/interspect:interspect-revert` |
 | Session records | 90 days | Excluded from baseline after 90d | N/A | Old sessions not counted in canary baselines |
 
 **Standard pattern:** Grace period → linear exclusion → no hysteresis needed (evidence is append-only, not demotable). Interspect uses a 90-day rolling window rather than per-entry decay because evidence is statistical — individual records don't go "stale," but old aggregate patterns lose relevance.
@@ -169,7 +203,7 @@ Interspect can emit **HMAC-signed action receipts** for routing-calibration even
 - **Agent identity**: receipts are signed as `sylveste://agent/interspect#<rotation_epoch>`. The signing key self-provisions on first use under `.clavain/keys/receipts/` (canon §Key handling).
 - **Substrate**: `ic receipt emit` (sign + store), `ic receipt verify <id> | --since=<dur>` (verify, exit 0=valid/1=not-found/2=bad-sig/3=bad-schema/4=unknown-key), `ic receipt keygen` (rotate). Receipts live in the **intercore** DB (`action_receipts`, schema v35), not the interspect DB.
 - **Wired now**: routing-**override** applications (via `_interspect_emit_receipt` in `_interspect_insert_evidence`, fail-open). The emission is guarded so a signing failure never breaks evidence recording.
-- **Not yet wired** (follow-up): proposal and canary-evaluation paths are distinct code paths and are tracked separately. `/interspect:status` surfaces the current interspect signed-receipt count.
+- **Not yet wired** (follow-up): proposal and canary-evaluation paths are distinct code paths and are tracked separately. `/interspect:interspect-status` surfaces the current interspect signed-receipt count.
 - **Prerequisite**: the intercore DB must be migrated to schema v35 (`ic init` or normal migration). Without it, emission fails open (no receipt, no error).
 
 ## Known Constraints
