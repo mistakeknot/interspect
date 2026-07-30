@@ -151,6 +151,19 @@ if [[ -d "$OVERLAY_DIR" ]]; then
     done
 fi
 
+# --- Skill calibration (throttled, fail-open) ---------------------------
+# Refresh per-skill composite scores from collected signals at most once/24h.
+# score-skills.py makes no API calls; backgrounded so session start never blocks.
+CALIB_SENTINEL="${HOME}/.clavain/interspect/.skill-scoring-last-run"
+SCORE_SCRIPT="$(dirname "${BASH_SOURCE[0]}")/../scripts/score-skills.py"
+if [[ -f "$SCORE_SCRIPT" ]] && command -v python3 >/dev/null 2>&1; then
+    if [[ ! -f "$CALIB_SENTINEL" ]] || [[ -n "$(find "$CALIB_SENTINEL" -mmin +1440 2>/dev/null)" ]]; then
+        mkdir -p "${HOME}/.clavain/interspect" "${HOME}/.clavain/logs"
+        touch "$CALIB_SENTINEL"
+        ( nohup python3 "$SCORE_SCRIPT" >> "${HOME}/.clavain/logs/skill-scoring.log" 2>&1 & ) 2>/dev/null
+    fi
+fi
+
 # Emit summary as additionalContext if there's anything to report
 if (( ${#SUMMARY_PARTS[@]} > 0 )); then
     # Join parts with newlines (safe via jq)
