@@ -273,19 +273,25 @@ def qualifying_skills(
     the window. Route-decision evidence is intentionally excluded. Returns
     [(skill_name, invocations_30d)] sorted by name for determinism.
     """
-    rows = conn.execute(
-        "SELECT source AS skill_name, "
-        "       COUNT(DISTINCT source_event_id) AS n "
-        "FROM evidence "
-        "WHERE source_kind = 'skill' "
-        "  AND event = 'skill_invocation' "
-        "  AND source_event_id IS NOT NULL "
-        "  AND ts >= ? "
-        "GROUP BY source "
-        "HAVING n >= ? "
-        "ORDER BY source ASC",
-        (lower_bound, min_invocations),
-    ).fetchall()
+    try:
+        rows = conn.execute(
+            "SELECT source AS skill_name, "
+            "       COUNT(DISTINCT source_event_id) AS n "
+            "FROM evidence "
+            "WHERE source_kind = 'skill' "
+            "  AND event = 'skill_invocation' "
+            "  AND source_event_id IS NOT NULL "
+            "  AND ts >= ? "
+            "GROUP BY source "
+            "HAVING n >= ? "
+            "ORDER BY source ASC",
+            (lower_bound, min_invocations),
+        ).fetchall()
+    except sqlite3.OperationalError as e:
+        # Pre-migration DB (missing source_kind/source_event_id, or no evidence
+        # table at all): fail open with no qualifying skills rather than crash.
+        print(f"score-skills: no signals (schema not ready: {e})", file=sys.stderr)
+        return []
     return [(r[0], int(r[1])) for r in rows]
 
 
