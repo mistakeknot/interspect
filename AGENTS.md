@@ -158,6 +158,29 @@ Generalizes the routing loop from `source_kind='agent'` to skills. Pipeline:
 
 ## Data Storage
 
+To store hook evidence outside the project, set `INTERSPECT_PRIVATE_DB` to an
+absolute database path in an existing, user-owned directory with mode `0700`.
+The directory path must contain no symlink components. Existing database files
+and SQLite sidecars must be owned regular files with one link. New databases
+are created exclusively with mode `0600`. Invalid overrides fail telemetry
+without falling back to project storage. Keep the same environment when running
+shared-library analysis commands against that evidence; standalone Python
+collectors require their existing `--db` option. The hook's skill scorer uses
+the selected database and keeps its output, log and throttle beside it.
+No data is migrated or deleted. The default remains project-local when the
+variable is unset; a set-but-empty value is invalid. Python is required only
+for override validation. Mode checks do not attest macOS ACLs; the operator
+must provision the directory without additional ACL grants. This redirects
+evidence storage, not project policy, overlays or cross-project discovery.
+Automatic project calibration is skipped in private mode because those
+calibrators assume project-local evidence. Collection and session accounting
+remain active. `INTERSPECT_DB` retains its prior meaning for other companions;
+this new variable does not intercept it. Resolve macOS temporary paths with
+`realpath` before use. Validation does not protect against concurrent changes
+by the directory owner or writable ancestors.
+If no project root can be resolved, initialization now exits without creating
+an `overlays` directory in the working directory.
+
 - **Evidence DB:** `.clavain/interspect/interspect.db` (SQLite, per-project). Tables include `evidence` (with `source_kind` ∈ `agent|tool|pattern|skill`), `canary`/`canary_samples` (agent/tool canaries), and the skill-calibration tables `skill_goals`, `skill_signals`, `skill_canary_samples`.
 - **Routing overrides:** `.claude/routing-overrides.json` (cross-repo contract). Carries agent `exclude`/`propose` entries plus `kind:"skill_tune"` entries.
 - **Skill overlays:** `~/.claude/skill-overlays/<plugin>:<skill>.md` (USER HOME — read by the Claude Code skill loader, not repo-tracked).

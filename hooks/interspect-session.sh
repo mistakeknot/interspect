@@ -156,11 +156,18 @@ fi
 # score-skills.py makes no API calls; backgrounded so session start never blocks.
 CALIB_SENTINEL="${HOME}/.clavain/interspect/.skill-scoring-last-run"
 SCORE_SCRIPT="$(dirname "${BASH_SOURCE[0]}")/../scripts/score-skills.py"
+SCORE_COMMAND=(python3 "$SCORE_SCRIPT")
+SCORE_LOG="${HOME}/.clavain/logs/skill-scoring.log"
+if [[ "${INTERSPECT_PRIVATE_DB+x}" == x ]]; then
+    CALIB_SENTINEL="$(dirname "$_INTERSPECT_DB")/.skill-scoring-last-run"
+    SCORE_LOG="$(dirname "$_INTERSPECT_DB")/skill-scoring.log"
+    SCORE_COMMAND+=(--db "$_INTERSPECT_DB")
+fi
 if [[ -f "$SCORE_SCRIPT" ]] && command -v python3 >/dev/null 2>&1; then
     if [[ ! -f "$CALIB_SENTINEL" ]] || [[ -n "$(find "$CALIB_SENTINEL" -mmin +1440 2>/dev/null)" ]]; then
-        mkdir -p "${HOME}/.clavain/interspect" "${HOME}/.clavain/logs"
+        mkdir -p "$(dirname "$CALIB_SENTINEL")" "$(dirname "$SCORE_LOG")"
         touch "$CALIB_SENTINEL"
-        ( nohup python3 "$SCORE_SCRIPT" >> "${HOME}/.clavain/logs/skill-scoring.log" 2>&1 & ) 2>/dev/null
+        ( nohup "${SCORE_COMMAND[@]}" >> "$SCORE_LOG" 2>&1 & ) 2>/dev/null
     fi
 fi
 

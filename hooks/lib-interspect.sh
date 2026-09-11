@@ -35,11 +35,55 @@ _LIB_INTERSPECT_LOADED=1
 # ─── Path helpers ────────────────────────────────────────────────────────────
 
 # Returns the path to the Interspect SQLite database.
-# Priority: $CLAUDE_PROJECT_DIR > git root > CWD (with guard) > fail
+# Priority: explicit $INTERSPECT_PRIVATE_DB > $CLAUDE_PROJECT_DIR > git root > CWD > fail
 # The hook CWD may be the plugin install dir, where git root resolves to the
 # plugin repo — not the project. $CLAUDE_PROJECT_DIR is the reliable source.
 _interspect_db_path() {
     local root=""
+
+    # Opt-in external evidence storage for read-only projects. The caller owns
+    # provisioning the private directory; an invalid override must never fall
+    # back to writing into the project. All hooks and commands share this path.
+    if [[ "${INTERSPECT_PRIVATE_DB+x}" == x ]]; then
+        command -v python3 >/dev/null 2>&1 || { echo "interspect: private database validation requires python3" >&2; return 1; }
+        python3 - "$INTERSPECT_PRIVATE_DB" "${1:-resolve}" <<'PRIVATE_DB'
+import os
+from pathlib import Path
+import stat
+import sys
+
+try:
+    raw = sys.argv[1]
+    path = Path(raw)
+    if (not path.is_absolute() or not path.name or str(path) != raw
+            or raw.endswith("/") or any(ord(c) < 32 or ord(c) == 127 for c in raw)):
+        raise ValueError("absolute database path required")
+    parent = path.parent
+    info = parent.stat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o077
+            or parent.resolve() != parent):
+        raise ValueError("existing private real directory required")
+    for candidate in (path, *(Path(raw + suffix) for suffix in ("-wal", "-shm", "-journal"))):
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        info = candidate.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise ValueError("owned regular database required")
+    if sys.argv[2] == "create" and not path.exists():
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            raise ValueError("database appeared during creation; retry required")
+        else:
+            os.close(fd)
+    print(path)
+except (OSError, ValueError):
+    print("interspect: rejected private database path", file=sys.stderr)
+    sys.exit(1)
+PRIVATE_DB
+        return $?
+    fi
 
     # 1. Prefer explicit project dir (set by Claude Code for the active project)
     if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
@@ -76,10 +120,10 @@ _interspect_project_name() {
 # Ensure the database and all tables exist. Fast-path: skip if file exists.
 # Sets global _INTERSPECT_DB to the resolved path for callers.
 _interspect_ensure_db() {
-    _INTERSPECT_DB=$(_interspect_db_path)
+    _INTERSPECT_DB=$(_interspect_db_path) || return 1
 
     # Fast path — DB already exists, but run migrations for new tables
-    if [[ -f "$_INTERSPECT_DB" ]]; then
+    if [[ -s "$_INTERSPECT_DB" ]]; then
         sqlite3 "$_INTERSPECT_DB" <<'MIGRATE'
 CREATE TABLE IF NOT EXISTS blacklist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,6 +219,9 @@ SKILLMIGRATE
     fi
 
     # Ensure directory exists (including overlays subdirectory for Type 1 modifications)
+    if [[ "${INTERSPECT_PRIVATE_DB+x}" == x ]]; then
+        _interspect_db_path create >/dev/null || return 1
+    fi
     mkdir -p "$(dirname "$_INTERSPECT_DB")" 2>/dev/null || return 1
     mkdir -p "$(dirname "$_INTERSPECT_DB")/overlays" 2>/dev/null || true
 
@@ -3378,6 +3425,8 @@ _interspect_review_calibration_ready() {
 #   If 5-15% → mark as lighten (fewer agents).
 #   If > 15% → keep full review.
 _interspect_calibrate_reviews() {
+    # Private evidence is not a source for automatic project policy changes.
+    [[ "${INTERSPECT_PRIVATE_DB+x}" == x ]] && return 1
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || return 1
 
@@ -3801,6 +3850,9 @@ _interspect_write_routing_calibration() {
 # Delegates to clavain-cli interspect-calibrate-thresholds if available.
 # Fail-open: errors must not block session teardown.
 _interspect_auto_calibrate() {
+    # These calibrators assume a project-local DB (including the Go helper).
+    # Keep collection active, but do not feed isolated evidence into policy.
+    [[ "${INTERSPECT_PRIVATE_DB+x}" == x ]] && return 0
     command -v clavain-cli >/dev/null 2>&1 || return 0
     clavain-cli interspect-calibrate-thresholds --window-days=30 2>/dev/null || true
 
