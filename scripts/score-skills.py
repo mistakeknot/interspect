@@ -17,9 +17,9 @@ natural sibling for skill *scoring* is the skill pipeline itself
 (``ingest-skill-audit.py`` → ``signals/collect_*`` → ``infer-skill-goals.py`` →
 this). This script mirrors those siblings' conventions verbatim: the same
 ``find_repo_root`` / ``default_db_path`` discovery, sqlite3 ``?`` placeholders,
-``--db``/``--dry-run``/``--repo-root`` CLI surface, and the SAME
-calibration-history snapshot machinery the agent writer uses (so skill scores get
-the same drift tracking calibrate-audit can later read).
+``--db``/``--dry-run``/``--repo-root`` CLI surface, and the same shared strict
+serialized merge/history writer used by agent calibration (so skill scores get
+the same drift tracking calibrate-audit can later read without racing agents).
 
 Algorithm
 ─────────
@@ -86,6 +86,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
+
+from routing_calibration_writer import CalibrationWriteError, merge_calibration
 
 
 # ─── Repo-root / DB discovery (mirrors ingest-skill-audit.py) ────────────────
@@ -557,63 +559,28 @@ def write_calibration(
     signal_info_weights: dict[str, float],
     static_weights: bool,
 ) -> None:
-    """Merge a ``skills`` block into routing-calibration.json (preserving any
-    existing ``agents`` block), bump schema_version additively, atomically
-    write, then archive a calibration-history snapshot — mirroring
-    ``_interspect_write_routing_calibration``.
+    """Merge skill-owned fields through the shared serialized strict writer.
 
     The cohort ``signal_info_weights`` (variance-aware weights, empty in static
     mode) are surfaced inside the ``skills`` block envelope so the weighting is
     auditable downstream.
     """
-    # Load existing calibration (preserve agents + sibling fields).
-    existing: dict = {}
-    if calibration_path.exists():
-        try:
-            existing = json.loads(calibration_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            existing = {}
-    if not isinstance(existing, dict):
-        existing = {}
-
-    existing["skills"] = _skills_block(scores)
-    existing["signal_info_weights"] = {
-        k: round(v, 4) for k, v in sorted(signal_info_weights.items())
+    update = {
+        "skills": _skills_block(scores),
+        "signal_info_weights": {
+            k: round(v, 4) for k, v in sorted(signal_info_weights.items())
+        },
+        "skills_calibrated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "skills_calibration": {
+            "window_days": window_days,
+            "min_invocations": min_invocations,
+            "half_life_days": half_life_days,
+            "qualifying_skills": len(scores),
+            "variance_aware": not static_weights,
+            "dispersion_ref": DISPERSION_REF,
+        },
     }
-    existing["skills_calibrated_at"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    existing["skills_calibration"] = {
-        "window_days": window_days,
-        "min_invocations": min_invocations,
-        "half_life_days": half_life_days,
-        "qualifying_skills": len(scores),
-        "variance_aware": not static_weights,
-        "dispersion_ref": DISPERSION_REF,
-    }
-    # Additive schema bump — never downgrade an existing higher version.
-    prev = existing.get("schema_version")
-    try:
-        prev_n = int(prev) if prev is not None else 0
-    except (TypeError, ValueError):
-        prev_n = 0
-    existing["schema_version"] = max(prev_n, SKILLS_SCHEMA_VERSION)
-
-    # Atomic write: tmp + mv.
-    calibration_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = calibration_path.with_suffix(f".json.tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(existing, indent=2, sort_keys=True) + "\n")
-    # Validate it re-parses before swapping.
-    json.loads(tmp.read_text())
-    tmp.replace(calibration_path)
-
-    # Archive snapshot (best-effort; never fail the calibration write).
-    try:
-        history_dir = calibration_path.parent / "calibration-history"
-        history_dir.mkdir(parents=True, exist_ok=True)
-        snap_ts = now.strftime("%Y-%m-%dT%H-%M-%SZ")
-        snap = history_dir / f"{snap_ts}.json"
-        snap.write_text(calibration_path.read_text())
-    except OSError:
-        pass
+    merge_calibration(calibration_path, writer="skill", update=update)
 
 
 # ─── Human leaderboard ───────────────────────────────────────────────────────
@@ -724,16 +691,20 @@ def main() -> int:
 
     calibration_path = db_path.parent / "routing-calibration.json"
     if not args.dry_run:
-        write_calibration(
-            calibration_path,
-            scores,
-            now=now,
-            window_days=args.window_days,
-            min_invocations=args.min_invocations,
-            half_life_days=args.half_life_days,
-            signal_info_weights=signal_info_weights,
-            static_weights=args.static_weights,
-        )
+        try:
+            write_calibration(
+                calibration_path,
+                scores,
+                now=now,
+                window_days=args.window_days,
+                min_invocations=args.min_invocations,
+                half_life_days=args.half_life_days,
+                signal_info_weights=signal_info_weights,
+                static_weights=args.static_weights,
+            )
+        except CalibrationWriteError as exc:
+            print(f"score-skills: calibration write failed: {exc}", file=sys.stderr)
+            return 1
         print(f"score-skills: wrote skills block → {calibration_path}", file=sys.stderr)
     else:
         print("score-skills: [dry-run] not writing routing-calibration.json", file=sys.stderr)

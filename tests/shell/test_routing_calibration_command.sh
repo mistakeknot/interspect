@@ -65,7 +65,9 @@ _interspect_record_verdict "route-1" "fd-quality" "NEEDS_ATTENTION" 1 "sonnet" "
 _interspect_record_verdict "route-2" "fd-quality" "NEEDS_ATTENTION" 1 "sonnet" "shipping" >/dev/null
 _interspect_record_verdict "route-3" "fd-quality" "NEEDS_ATTENTION" 1 "sonnet" "shipping" >/dev/null
 artifact="$valid_project/.clavain/interspect/routing-calibration.json"
-printf '{"stale":true}\n' > "$artifact"
+# A valid supported envelope is replaceable; malformed/missing-schema evidence
+# is preserved and rejected by the writer-concurrency regression suite.
+printf '{"schema_version":2,"stale":true}\n' > "$artifact"
 before=$(cat "$artifact")
 status=$(run_command "$valid_project")
 after=$(cat "$artifact" 2>/dev/null || true)

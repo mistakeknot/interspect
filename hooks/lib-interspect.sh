@@ -3778,11 +3778,12 @@ print(json.dumps(out, separators=(",", ":")))
 PY
 }
 
-# Write routing calibration file atomically.
+# Merge the agent-owned routing calibration fields through the shared serializer.
 # Reads agent scores, writes .clavain/interspect/routing-calibration.json.
 _interspect_write_routing_calibration() {
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
 
     local scores
     scores=$(_interspect_compute_agent_scores)
@@ -3792,7 +3793,7 @@ _interspect_write_routing_calibration() {
     calibration_dir="$(dirname "$db")"
     local calibration_path="${calibration_dir}/routing-calibration.json"
 
-    # Build calibration JSON (v2 with source weighting)
+    # Build the agent-owned calibration update (v2 with source weighting).
     local calibration_json
     calibration_json=$(echo "$scores" | jq -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --argjson min "$_INTERSPECT_CALIBRATION_MIN_SESSIONS" \
@@ -3802,7 +3803,6 @@ _interspect_write_routing_calibration() {
         --argjson w_normal "$_INTERSPECT_SOURCE_WEIGHT_NORMAL" '
         {
             calibrated_at: $ts,
-            schema_version: 2,
             min_sessions: $min,
             min_non_bootstrap_sessions: $min_non_bootstrap,
             source_weights: {
@@ -3824,26 +3824,11 @@ _interspect_write_routing_calibration() {
         }
     ' 2>/dev/null) || return 1
 
-    # Atomic write: tmp + validate + mv
-    local tmpfile="${calibration_path}.tmp.$$"
-    printf '%s\n' "$calibration_json" > "$tmpfile"
-    if ! jq -e '.' "$tmpfile" >/dev/null 2>&1; then
-        rm -f "$tmpfile"
-        return 1
-    fi
-    mv "$tmpfile" "$calibration_path"
-
-    # Archive historical snapshot for /interspect:calibrate-audit (Sylveste-xr3).
-    # Best-effort: failure here must NOT break the calibration write.
-    local history_dir="${calibration_dir}/calibration-history"
-    if mkdir -p "$history_dir" 2>/dev/null; then
-        local snapshot_ts
-        snapshot_ts=$(date -u +%Y-%m-%dT%H-%M-%SZ)
-        local snapshot_path="${history_dir}/${snapshot_ts}.json"
-        cp "$calibration_path" "$snapshot_path" 2>/dev/null || true
-        # Prune snapshots older than 1 year to bound disk usage.
-        find "$history_dir" -maxdepth 1 -name "*.json" -type f -mtime +365 -delete 2>/dev/null || true
-    fi
+    local writer_helper
+    writer_helper="$(dirname "${BASH_SOURCE[0]}")/../scripts/routing_calibration_writer.py"
+    [[ -f "$writer_helper" ]] || return 1
+    printf '%s\n' "$calibration_json" | python3 "$writer_helper" \
+        --calibration "$calibration_path" --writer agent
 }
 
 # Auto-calibrate confidence thresholds from canary outcomes.
