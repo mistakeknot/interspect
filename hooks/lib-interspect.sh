@@ -3201,30 +3201,39 @@ _interspect_insert_evidence() {
     local e_source_table="${source_table//\'/\'\'}"
     local e_raw_override_reason="${raw_override_reason//\'/\'\'}"
     local e_source_kind="${source_kind//\'/\'\'}"
+    local e_finding_key="${finding_key//\'/\'\'}"
 
     # Low-confidence gate (Sylveste-06i.4 Option A): a flagged row is
     # quarantined indefinitely (sentinel far past any real quarantine decay)
     # instead of the normal 48h window, so it never drives agent_wrong
     # exclusion on its own — UNLESS this is a second, independent (different
-    # session) signal against the same finding_id, in which case it IS the
-    # corroboration: lift the gate on this row and every prior gated row for
-    # that finding_id right now.
+    # session) signal against the same finding_key with a MATCHING
+    # override_reason (round-2 M2 fix: a disagreeing reason, e.g.
+    # "deprioritized", must never lift a gate set by "agent_wrong"), in
+    # which case it IS the corroboration: lift the gate on this row and
+    # every prior gated row for that finding_key right now.
+    #
+    # Matches on the real finding_key column (round-2 M3 fix), not
+    # json_extract(context, ...) — the context column can be truncated or
+    # emptied by _interspect_sanitize, and json_extract on malformed JSON
+    # aborts the whole statement. finding_key is a plain escaped column
+    # value, so one malformed context row can never break corroboration for
+    # any other row.
     local corroborated_at=0
     if [[ "$is_low_confidence" == "1" ]]; then
         quarantine_until=$_INTERSPECT_LOW_CONFIDENCE_SENTINEL
-        if [[ -n "$finding_id" ]]; then
-            local e_finding_id already_gated
-            e_finding_id=$(_interspect_sql_escape "$finding_id")
-            already_gated=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${e_source}' AND low_confidence = 1 AND session_id != '${e_session}' AND json_extract(context, '\$.finding_id') = '${e_finding_id}';" 2>/dev/null) || already_gated=0
+        if [[ -n "$finding_key" ]]; then
+            local already_gated
+            already_gated=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${e_source}' AND low_confidence = 1 AND session_id != '${e_session}' AND override_reason = '${e_reason}' AND finding_key = '${e_finding_key}';" 2>/dev/null) || already_gated=0
             if [[ "${already_gated:-0}" -gt 0 ]]; then
                 corroborated_at=$(date +%s)
                 quarantine_until=0
-                _interspect_sqlite_write "$db" "UPDATE evidence SET quarantine_until = 0, corroborated_at = ${corroborated_at} WHERE source = '${e_source}' AND low_confidence = 1 AND json_extract(context, '\$.finding_id') = '${e_finding_id}';" >/dev/null || true
+                _interspect_sqlite_write "$db" "UPDATE evidence SET quarantine_until = 0, corroborated_at = ${corroborated_at} WHERE source = '${e_source}' AND low_confidence = 1 AND override_reason = '${e_reason}' AND finding_key = '${e_finding_key}';" >/dev/null || true
             fi
         fi
     fi
 
-    _interspect_sqlite_write "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason, quarantine_until, source_kind, low_confidence, corroborated_at) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''), ${quarantine_until}, '${e_source_kind}', ${is_low_confidence}, ${corroborated_at});"
+    _interspect_sqlite_write "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason, quarantine_until, source_kind, low_confidence, corroborated_at, finding_key) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''), ${quarantine_until}, '${e_source_kind}', ${is_low_confidence}, ${corroborated_at}, NULLIF('${e_finding_key}',''));"
 
     # Moat play (sylveste-ewy3.5.4): emit a signed receipt for routing-override
     # applications. Opt-in + fail-open; proposal & canary paths are a separate
