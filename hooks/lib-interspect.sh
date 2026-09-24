@@ -155,6 +155,9 @@ MIGRATE
         sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_source_event_id ON evidence(source_event_id);" 2>/dev/null || true
         # Add quarantine column to evidence (rsj.1.4: evidence quarantine)
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN quarantine_until INTEGER DEFAULT 0;" 2>/dev/null || true
+        # Add low-confidence gate columns to evidence (Sylveste-06i.4 Option A)
+        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN low_confidence INTEGER DEFAULT 0;" 2>/dev/null || true
+        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN corroborated_at INTEGER DEFAULT 0;" 2>/dev/null || true
         # Add source_kind discriminator (sylveste-sfhq.1: telemetry fusion)
         # Allowed values: agent | tool | pattern | skill (skill added sylveste-7aj8.1).
         # CHECK constraint can't be added by ALTER TABLE in SQLite — enforced at insert
