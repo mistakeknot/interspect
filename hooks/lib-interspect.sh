@@ -3246,23 +3246,31 @@ _interspect_insert_evidence() {
 # Explicitly corroborate a gated low-confidence finding, lifting the gate
 # without requiring a second _interspect_insert_evidence call (e.g. a
 # re-judge pass or an explicit human confirmation records corroboration this
-# way instead of a second override). Args: $1=source (agent), $2=finding_id.
+# way instead of a second override).
+# Args: $1=source (agent) $2=review_id $3=finding_id $4=corroborated_by
+#   (a session/actor identifier for the corroborating signal — round-2 N3:
+#   rows whose session_id equals corroborated_by are excluded from the
+#   UPDATE, so the session that set the gate can never lift its own gate
+#   through this path either).
+# Matches the real finding_key column (review_id:finding_id), same as
+# _interspect_insert_evidence (round-2 M1/M3).
 # Output: count of rows corroborated (0 if none were gated for that finding).
 _interspect_corroborate_evidence() {
-    local source="$1" finding_id="$2"
-    [[ -n "$source" && -n "$finding_id" ]] || return 1
+    local source="$1" review_id="$2" finding_id="$3" corroborated_by="${4:-}"
+    [[ -n "$source" && -n "$review_id" && -n "$finding_id" ]] || return 1
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || return 1
-    local e_source e_finding_id now
+    local e_source e_finding_key e_corroborated_by now
     e_source=$(_interspect_sql_escape "$source")
-    e_finding_id=$(_interspect_sql_escape "$finding_id")
+    e_finding_key=$(_interspect_sql_escape "${review_id}:${finding_id}")
+    e_corroborated_by=$(_interspect_sql_escape "$corroborated_by")
     now=$(date +%s)
+    # Single connection: UPDATE then SELECT changes() in the same session, so
+    # the affected-count is atomic with the update (no separate COUNT-then-
+    # UPDATE race — round-2 N3).
     local affected
-    affected=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${e_source}' AND low_confidence = 1 AND corroborated_at = 0 AND json_extract(context, '\$.finding_id') = '${e_finding_id}';" 2>/dev/null) || affected=0
-    if [[ "${affected:-0}" -gt 0 ]]; then
-        _interspect_sqlite_write "$db" "UPDATE evidence SET quarantine_until = 0, corroborated_at = ${now} WHERE source = '${e_source}' AND low_confidence = 1 AND corroborated_at = 0 AND json_extract(context, '\$.finding_id') = '${e_finding_id}';" >/dev/null || true
-    fi
-    echo "$affected"
+    affected=$(sqlite3 "$db" "UPDATE evidence SET quarantine_until = 0, corroborated_at = ${now} WHERE source = '${e_source}' AND low_confidence = 1 AND corroborated_at = 0 AND finding_key = '${e_finding_key}' AND session_id != '${e_corroborated_by}'; SELECT changes();" 2>/dev/null) || affected=0
+    echo "${affected:-0}"
 }
 
 # Low-confidence gate stats (Sylveste-06i.4 Option A → Option B decision
