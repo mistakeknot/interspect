@@ -25,6 +25,22 @@ If no arguments (or incomplete), ask the user:
 
 Default to `agent_wrong` if the user doesn't specify.
 
+## Low-Confidence Finding Lookup (optional, best-effort)
+
+If the description references a flux-drive finding ID (e.g. `P0-3`) and a `findings.json` from that run is known (most recent `findings.json` under the flux-drive output dir, if the caller has one in scope), check whether the finding carries the severity-tier confidence gate (`docs/spec/core/synthesis.md` Step 4a in interflux):
+
+```bash
+FINDING_ID=""   # e.g. "P0-3", parsed from the description if present
+LOW_CONFIDENCE="false"
+if [[ -n "$FINDING_ID" && -f "$FINDINGS_JSON" ]] && command -v jq &>/dev/null; then
+    LOW_CONFIDENCE=$(jq -r --arg id "$FINDING_ID" \
+        '(.findings[] | select(.id == $id) | .low_confidence) // false' \
+        "$FINDINGS_JSON" 2>/dev/null) || LOW_CONFIDENCE="false"
+fi
+```
+
+This is best-effort — if no finding ID is identifiable or no `findings.json` is in scope, `LOW_CONFIDENCE` stays `"false"` and the correction is recorded exactly as before. Never block on this lookup.
+
 ## Record Evidence
 
 Locate and source the Interspect library:
