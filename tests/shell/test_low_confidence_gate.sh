@@ -291,12 +291,12 @@ assert_eq "M4: severity_miscalibrated evidence from a single resolving session i
 RESULT=$(_interspect_is_routing_eligible fd-safety) || true
 assert_contains "M4: single-session severity_miscalibrated evidence does NOT drive agent_wrong routing eligibility by itself" "$RESULT" "not_eligible"
 
-# A second, independent resolving session hitting the SAME finding
-# corroborates it exactly like a manual correction would, once the event
-# producer supplies a matching review_run_id (accepted via optional
-# .review_run_id on the event; absent today, so this row stays gated on its
-# own finding_id-only key until a producer-side follow-up threads one
-# through — see the fix comment in lib-interspect.sh).
+# resolve.md does not yet emit a per-run review_run_id (that's tracked as a
+# producer-side follow-up, outside this repo). Without one, finding_key is
+# left unset by design (round-2 M1 fix: an un-namespaced finding_id must
+# never self-match, since it's positional and would otherwise collide
+# across unrelated runs/resolutions) — so a second single-session
+# resolution on the "same" finding_id must NOT auto-corroborate the first.
 EVENT_JSON_2=$(jq -n '{
     id: "evt-m4-2",
     finding_id: "P1-4",
@@ -309,7 +309,39 @@ EVENT_JSON_2=$(jq -n '{
 }')
 _interspect_process_disagreement_event "$EVENT_JSON_2" 2>/dev/null || true
 ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source='fd-safety' AND override_reason='severity_miscalibrated' AND low_confidence=1 AND corroborated_at > 0;")
-assert_eq "M4: a second independent resolving session on the same finding corroborates the gate" "$ROWS" "2"
+assert_eq "M4: without a producer-supplied review_run_id, a second resolution does NOT auto-corroborate (fails safe, needs explicit corroboration)" "$ROWS" "0"
+
+# When the producer DOES supply a per-run review_run_id (e.g. a future
+# resolve.md carrying synthesis_timestamp), the row corroborates exactly
+# like a manual correction — proving the M4 fix's finding_key plumbing
+# works end to end once that field is populated.
+sqlite3 "$DB" "DELETE FROM evidence;"
+EVENT_JSON_3=$(jq -n '{
+    id: "evt-m4-3",
+    finding_id: "P1-9",
+    resolution: "accepted",
+    chosen_severity: "P0",
+    impact: "severity_overridden",
+    dismissal_reason: "",
+    session_id: "sess-resolver-3",
+    review_run_id: "run-m4",
+    agents_json: {"fd-safety": "P1"}
+}')
+EVENT_JSON_4=$(jq -n '{
+    id: "evt-m4-4",
+    finding_id: "P1-9",
+    resolution: "accepted",
+    chosen_severity: "P0",
+    impact: "severity_overridden",
+    dismissal_reason: "",
+    session_id: "sess-resolver-4",
+    review_run_id: "run-m4",
+    agents_json: {"fd-safety": "P1"}
+}')
+_interspect_process_disagreement_event "$EVENT_JSON_3" 2>/dev/null || true
+_interspect_process_disagreement_event "$EVENT_JSON_4" 2>/dev/null || true
+ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source='fd-safety' AND override_reason='severity_miscalibrated' AND low_confidence=1 AND corroborated_at > 0;")
+assert_eq "M4: with a producer-supplied review_run_id, two independent resolutions on the same finding DO corroborate" "$ROWS" "2"
 
 echo ""
 echo "=== Existing (non-flagged) behaviour is unchanged ==="
