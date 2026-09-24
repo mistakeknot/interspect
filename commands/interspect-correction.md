@@ -25,9 +25,9 @@ If no arguments (or incomplete), ask the user:
 
 Default to `agent_wrong` if the user doesn't specify.
 
-## Record Evidence
+## Locate and Source the Interspect Library
 
-Locate and source the Interspect library:
+Needed both for the low-confidence lookup below and for recording evidence:
 
 ```bash
 # Prefer own copy, fall back to Clavain cache, then monorepo dev path
@@ -42,16 +42,47 @@ fi
 source "$INTERSPECT_LIB"
 ```
 
-Then initialize and insert:
+## Low-Confidence Finding Lookup (optional, best-effort)
+
+If the description references a flux-drive finding ID (e.g. `P0-3`) and a `findings.json` from that run is known, check whether the finding carries the severity-tier confidence gate (`docs/spec/core/synthesis.md` Step 4a in interflux).
+
+`FINDINGS_JSON` is the newest `findings.json` under the flux-drive output directory for the current project (e.g. `find . -path '*/flux-drive/*/findings.json' -newer <marker> 2>/dev/null | sort | tail -1`, or whatever the caller already has in scope from the run that produced this finding). `REVIEW_ID` identifies that specific *run* — it namespaces `FINDING_ID` so two different runs' `P0-1` are never treated as the same finding (flux-drive IDs are positional per run and otherwise collide across runs). The output directory's basename alone is NOT enough: flux-drive deliberately keeps that basename stable across reruns of the same target, so two reruns would otherwise collide. `_interspect_review_id_from_findings` (defined by the library sourced above) appends the run's `synthesis_timestamp` to the basename so reruns never share a `REVIEW_ID` (Sylveste-06i.4 round-2 M1):
+
+```bash
+FINDING_ID=""   # e.g. "P0-3", parsed from the description if present
+REVIEW_ID=""    # per-run id: <output-dir basename>@<synthesis_timestamp>
+LOW_CONFIDENCE="false"
+if [[ -n "$FINDING_ID" && -f "$FINDINGS_JSON" ]] && command -v jq &>/dev/null; then
+    LOW_CONFIDENCE=$(jq -r --arg id "$FINDING_ID" \
+        '(.findings[] | select(.id == $id) | .low_confidence) // false' \
+        "$FINDINGS_JSON" 2>/dev/null) || LOW_CONFIDENCE="false"
+    [[ -z "$REVIEW_ID" ]] && REVIEW_ID="$(_interspect_review_id_from_findings "$FINDINGS_JSON")"
+fi
+```
+
+This is best-effort — if no finding ID is identifiable or no `findings.json` is in scope, `LOW_CONFIDENCE` stays `"false"` and the correction is recorded exactly as before. Never block on this lookup. If `LOW_CONFIDENCE` is true but `REVIEW_ID` could not be determined, still pass `finding_id` through (the row is gated, fail-safe) but omit `review_id` — such a row can only be lifted via explicit `_interspect_corroborate_evidence`, never by a second correction, since an un-namespaced key never self-matches.
+
+## Record Evidence
 
 ```bash
 _interspect_ensure_db
 
-# Build context JSON (use jq for proper escaping)
+# Build context JSON (use jq for proper escaping). low_confidence/finding_id/
+# review_id are the severity-tier confidence gate fields (Sylveste-06i.4) —
+# when set, lib-interspect.sh quarantines this evidence until a second
+# independent correction with a MATCHING override_reason corroborates the
+# same review_id:finding_id (a bare finding_id is positional per run and
+# would otherwise collide across unrelated runs).
 CONTEXT=$(jq -n \
     --arg desc "$DESCRIPTION" \
     --arg reason "$OVERRIDE_REASON" \
-    '{description: $desc, override_reason: $reason}')
+    --argjson low_confidence "${LOW_CONFIDENCE:-false}" \
+    --arg finding_id "${FINDING_ID:-}" \
+    --arg review_id "${REVIEW_ID:-}" \
+    '{description: $desc, override_reason: $reason} +
+     (if $low_confidence then {low_confidence: true} else {} end) +
+     (if $finding_id != "" then {finding_id: $finding_id} else {} end) +
+     (if $review_id != "" then {review_id: $review_id} else {} end)')
 
 _interspect_insert_evidence \
     "$CLAUDE_SESSION_ID" \
