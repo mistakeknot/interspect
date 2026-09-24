@@ -63,11 +63,18 @@ Then initialize and insert:
 ```bash
 _interspect_ensure_db
 
-# Build context JSON (use jq for proper escaping)
+# Build context JSON (use jq for proper escaping). low_confidence/finding_id
+# are the severity-tier confidence gate fields (Sylveste-06i.4) — when set,
+# lib-interspect.sh quarantines this evidence until a second independent
+# correction corroborates the same finding_id.
 CONTEXT=$(jq -n \
     --arg desc "$DESCRIPTION" \
     --arg reason "$OVERRIDE_REASON" \
-    '{description: $desc, override_reason: $reason}')
+    --argjson low_confidence "${LOW_CONFIDENCE:-false}" \
+    --arg finding_id "${FINDING_ID:-}" \
+    '{description: $desc, override_reason: $reason} +
+     (if $low_confidence then {low_confidence: true} else {} end) +
+     (if $finding_id != "" then {finding_id: $finding_id} else {} end)')
 
 _interspect_insert_evidence \
     "$CLAUDE_SESSION_ID" \
