@@ -3133,14 +3133,33 @@ _interspect_insert_evidence() {
     # Low-confidence gate (Sylveste-06i.4 Option A): read BEFORE sanitize, from
     # the raw context the caller passed. A synthesis-produced finding sets
     # context.low_confidence=true (severity boundary or single-judge P0/P1
-    # call) and, when it wants corroboration tracked, context.finding_id.
+    # call) and, when it wants corroboration tracked, context.finding_id plus
+    # context.review_id.
+    #
+    # review_id (round-2 M1 fix): flux-drive finding IDs are positional within
+    # a run ("P0-1", "P1-1", …) — every run has a P0-1, so a bare finding_id
+    # collides across unrelated runs. Callers MUST pass a run-scoped
+    # review_id (e.g. the flux-drive output-directory basename) alongside
+    # finding_id; the two combine into finding_key = "review_id:finding_id",
+    # which is what corroboration actually matches on. A caller that omits
+    # review_id still gets gated (fails safe — never auto-excluded) but that
+    # row can only ever be corroborated explicitly via
+    # _interspect_corroborate_evidence, never by a second _interspect_insert_evidence
+    # call, since an un-namespaced key does not match itself here (see below).
+    #
     # Malformed/absent context fails open (gate not applied) — never blocks
     # evidence recording.
     local is_low_confidence=0
     local finding_id=""
+    local review_id=""
     if command -v jq >/dev/null 2>&1; then
         [[ "$(jq -r '.low_confidence // false' <<<"$context_json" 2>/dev/null)" == "true" ]] && is_low_confidence=1
         finding_id=$(jq -r '.finding_id // empty' <<<"$context_json" 2>/dev/null) || finding_id=""
+        review_id=$(jq -r '.review_id // empty' <<<"$context_json" 2>/dev/null) || review_id=""
+    fi
+    local finding_key=""
+    if [[ -n "$finding_id" && -n "$review_id" ]]; then
+        finding_key="${review_id}:${finding_id}"
     fi
 
     # Sanitize user-controlled fields
