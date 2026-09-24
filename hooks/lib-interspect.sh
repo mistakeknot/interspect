@@ -3109,6 +3109,32 @@ _interspect_validate_hook_id() {
 
 # ─── Evidence insertion ──────────────────────────────────────────────────────
 
+# Round-2 M1 (Sylveste-06i.4): derive a run-scoped review_id from a
+# findings.json path. The output-directory basename ALONE is deliberately
+# stable across reruns of the same target (flux-drive SKILL.md ~128-133), so
+# two independent reruns produced the same review_id and their positional
+# finding IDs (e.g. "P0-1") collided in finding_key, letting an unrelated
+# rerun's flag corroborate a stale one. Append synthesis_timestamp (unique
+# per run, part of the findings.json schema — synthesis.md :292) when
+# present so reruns never share a review_id. Falls back to the bare basename
+# when synthesis_timestamp is absent (older findings.json, or lookup
+# failure) — best-effort, same as the caller in interspect-correction.md.
+# Args: $1=findings_json_path
+_interspect_review_id_from_findings() {
+    local findings_json="$1"
+    local base ts
+    base="$(basename "$(dirname "$findings_json")")"
+    ts=""
+    if [[ -f "$findings_json" ]] && command -v jq >/dev/null 2>&1; then
+        ts=$(jq -r '.synthesis_timestamp // empty' "$findings_json" 2>/dev/null) || ts=""
+    fi
+    if [[ -n "$ts" ]]; then
+        echo "${base}@${ts}"
+    else
+        echo "$base"
+    fi
+}
+
 # Insert an evidence row with sanitization.
 # Args: $1=session_id $2=source $3=event $4=override_reason $5=context_json $6=hook_id
 #       $7=source_event_id (optional) $8=source_table (optional) $9=raw_override_reason (optional)
