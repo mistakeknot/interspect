@@ -256,6 +256,17 @@ CREATE INDEX IF NOT EXISTS idx_evidence_source_event_id ON evidence(source_event
 -- calculations until quarantine_until epoch passes. Default 0 = no quarantine.
 ALTER TABLE evidence ADD COLUMN quarantine_until INTEGER DEFAULT 0;
 
+-- Low-confidence gate columns (Sylveste-06i.4 Option A): a caller flags
+-- evidence as low_confidence=1 (via context.low_confidence) when it
+-- originates from a severity-boundary or single-judge P0/P1 flux-drive
+-- finding. Such rows get quarantine_until set to a far-future sentinel
+-- (not the normal 48h decay) so they never drive agent_wrong exclusion on
+-- their own. corroborated_at records when a second independent signal
+-- (another judge or person) lifted the gate. See
+-- _interspect_insert_evidence and _interspect_corroborate_evidence.
+ALTER TABLE evidence ADD COLUMN low_confidence INTEGER DEFAULT 0;
+ALTER TABLE evidence ADD COLUMN corroborated_at INTEGER DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     start_ts TEXT NOT NULL,
