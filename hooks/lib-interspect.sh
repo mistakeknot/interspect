@@ -2670,7 +2670,7 @@ _interspect_consume_kernel_events() {
 _interspect_process_disagreement_event() {
     local event_json="$1"
 
-    local finding_id resolution chosen_severity impact agents_json dismissal_reason session_id event_id
+    local finding_id resolution chosen_severity impact agents_json dismissal_reason session_id event_id review_run_id
     finding_id=$(echo "$event_json" | jq -r '.finding_id // empty') || return 0
     event_id=$(echo "$event_json" | jq -r '.id // empty') || event_id=""
     resolution=$(echo "$event_json" | jq -r '.resolution // empty') || return 0
@@ -2679,11 +2679,17 @@ _interspect_process_disagreement_event() {
     agents_json=$(echo "$event_json" | jq -r '.agents_json // "{}"') || return 0
     dismissal_reason=$(echo "$event_json" | jq -r '.dismissal_reason // empty') || return 0
     session_id=$(echo "$event_json" | jq -r '.session_id // "unknown"') || return 0
+    # Round-2 M4: optional per-run identity, when the producer supplies one
+    # (e.g. Clavain resolve.md's review_run_id), used to namespace finding_key
+    # exactly like the manual correction path (Sylveste-06i.4 M1). Absent for
+    # today's producer — see the low_confidence block below.
+    review_run_id=$(echo "$event_json" | jq -r '.review_run_id // empty') || review_run_id=""
 
     [[ -z "$finding_id" || -z "$resolution" || -z "$chosen_severity" ]] && return 0
 
     # Map dismissal_reason to override_reason for evidence
     local override_reason=""
+    local is_severity_miscalibrated=0
     case "$dismissal_reason" in
         agent_wrong)        override_reason="agent_wrong" ;;
         deprioritized)      override_reason="deprioritized" ;;
@@ -2692,6 +2698,7 @@ _interspect_process_disagreement_event() {
         "")
             if [[ "$resolution" == "accepted" && "$impact" == "severity_overridden" ]]; then
                 override_reason="severity_miscalibrated"
+                is_severity_miscalibrated=1
             fi
             ;;
     esac
@@ -2709,15 +2716,39 @@ _interspect_process_disagreement_event() {
         # Only create evidence for agents whose severity was overridden
         [[ "$agent_severity" == "$chosen_severity" ]] && continue
 
+        # Round-2 M4 (Sylveste-06i.4): the severity_miscalibrated branch sets
+        # chosen_severity to the mechanical max of the panel's own ratings
+        # (synthesis.md Rule 4) — no adjudication beyond the conflicting
+        # panel itself. That is exactly the boundary-noise case Option A
+        # exists to stop auto-driving agent_wrong/severity_miscalibrated
+        # exclusion, so gate it the same way a low-confidence manual
+        # correction is gated: sentinel quarantine until a second,
+        # independent signal corroborates it. (The dismissal-reason branches
+        # above stay ungated for now — a human's explicit
+        # agent_wrong/deprioritized/etc. call on a resolved disagreement;
+        # see synthesis.md Step 4a for the documented rationale.)
         local context
-        context=$(jq -n \
-            --arg finding_id "$finding_id" \
-            --arg agent_severity "$agent_severity" \
-            --arg chosen_severity "$chosen_severity" \
-            --arg resolution "$resolution" \
-            --arg impact "$impact" \
-            --arg dismissal_reason "$dismissal_reason" \
-            '{finding_id:$finding_id,agent_severity:$agent_severity,chosen_severity:$chosen_severity,resolution:$resolution,impact:$impact,dismissal_reason:$dismissal_reason}')
+        if [[ "$is_severity_miscalibrated" == "1" ]]; then
+            context=$(jq -n \
+                --arg finding_id "$finding_id" \
+                --arg agent_severity "$agent_severity" \
+                --arg chosen_severity "$chosen_severity" \
+                --arg resolution "$resolution" \
+                --arg impact "$impact" \
+                --arg dismissal_reason "$dismissal_reason" \
+                --arg review_id "$review_run_id" \
+                '{finding_id:$finding_id,agent_severity:$agent_severity,chosen_severity:$chosen_severity,resolution:$resolution,impact:$impact,dismissal_reason:$dismissal_reason,low_confidence:true} +
+                 (if $review_id != "" then {review_id:$review_id} else {} end)')
+        else
+            context=$(jq -n \
+                --arg finding_id "$finding_id" \
+                --arg agent_severity "$agent_severity" \
+                --arg chosen_severity "$chosen_severity" \
+                --arg resolution "$resolution" \
+                --arg impact "$impact" \
+                --arg dismissal_reason "$dismissal_reason" \
+                '{finding_id:$finding_id,agent_severity:$agent_severity,chosen_severity:$chosen_severity,resolution:$resolution,impact:$impact,dismissal_reason:$dismissal_reason}')
+        fi
 
         _interspect_insert_evidence \
             "$session_id" "$agent_name" "disagreement_override" \
