@@ -27,6 +27,8 @@
 #   _interspect_flock_git     — serialized git operations via flock
 #   _interspect_compute_delegation_stats — per-category delegation pass rates (B4)
 #   _interspect_write_delegation_calibration — write delegation-calibration.json (B4)
+#   _interspect_corroborate_evidence — lift a low-confidence gate once another judge/person corroborates (Sylveste-06i.4)
+#   _interspect_low_confidence_gate_stats — flagged/corroborated/still-gated counts for the low-confidence gate (Sylveste-06i.4)
 
 # Guard against re-parsing (same pattern as lib-signals.sh)
 [[ -n "${_LIB_INTERSPECT_LOADED:-}" ]] && return 0
