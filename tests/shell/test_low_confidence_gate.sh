@@ -224,6 +224,94 @@ STATS=$(_interspect_low_confidence_gate_stats)
 assert_eq "empty DB: 0 flagged, 0 corroborated, 0 still gated" "$STATS" "0|0|0"
 
 echo ""
+echo "=== Round-2 M1: rerun of the same target must not share a review_id ==="
+
+# flux-drive's output-dir basename is deliberately stable across reruns of
+# the same target (SKILL.md ~128-133), so the bare basename used to be the
+# whole review_id — two reruns collided. _interspect_review_id_from_findings
+# must fold in synthesis_timestamp so reruns diverge.
+RUN_DIR="$TEST_DIR/flux-drive-abc12345"
+mkdir -p "$RUN_DIR"
+
+if command -v _interspect_review_id_from_findings >/dev/null 2>&1; then
+    cat > "$RUN_DIR/findings.json" <<'JSON'
+{"synthesis_timestamp": "2026-09-24T01:00:00Z", "findings": []}
+JSON
+    RID1=$(_interspect_review_id_from_findings "$RUN_DIR/findings.json")
+
+    cat > "$RUN_DIR/findings.json" <<'JSON'
+{"synthesis_timestamp": "2026-09-24T02:00:00Z", "findings": []}
+JSON
+    RID2=$(_interspect_review_id_from_findings "$RUN_DIR/findings.json")
+else
+    RID1="<missing-fn>"
+    RID2="<missing-fn>"
+fi
+
+assert_eq "M1: rerun 1 review_id incorporates synthesis_timestamp" \
+    "$RID1" "flux-drive-abc12345@2026-09-24T01:00:00Z"
+assert_eq "M1: rerun 2 (same output-dir basename) gets a DIFFERENT review_id" \
+    "$RID2" "flux-drive-abc12345@2026-09-24T02:00:00Z"
+
+sqlite3 "$DB" "DELETE FROM evidence;"
+_interspect_insert_evidence "sess-rerun1" "fd-m1" "override" "agent_wrong" \
+    "{\"low_confidence\":true,\"review_id\":\"$RID1\",\"finding_id\":\"P0-1\"}" "interspect-correction"
+_interspect_insert_evidence "sess-rerun2" "fd-m1" "override" "agent_wrong" \
+    "{\"low_confidence\":true,\"review_id\":\"$RID2\",\"finding_id\":\"P0-1\"}" "interspect-correction"
+ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE low_confidence=1 AND corroborated_at > 0;")
+assert_eq "M1: two reruns of the same target (same basename, different synthesis_timestamp) do NOT corroborate" "$ROWS" "0"
+
+echo ""
+echo "=== Round-2 M4: automatic disagreement path (severity_miscalibrated) must be gated ==="
+
+# resolve.md's step 5b emits disagreement_resolved events from a single
+# resolving session with no second judge. The severity_overridden/no-
+# dismissal-reason branch (chosen_severity = mechanical max of the panel's
+# own ratings, synthesis.md Rule 4) is exactly the boundary-noise case
+# Option A exists to gate — it must NOT auto-drive agent_wrong/
+# severity_miscalibrated exclusion from one session's resolution alone.
+sqlite3 "$DB" "DELETE FROM evidence;"
+
+EVENT_JSON=$(jq -n '{
+    id: "evt-m4-1",
+    finding_id: "P1-4",
+    resolution: "accepted",
+    chosen_severity: "P0",
+    impact: "severity_overridden",
+    dismissal_reason: "",
+    session_id: "sess-resolver-1",
+    agents_json: {"fd-safety": "P1"}
+}')
+_interspect_process_disagreement_event "$EVENT_JSON" 2>/dev/null || true
+
+ROW=$(sqlite3 "$DB" "SELECT low_confidence, quarantine_until FROM evidence WHERE source='fd-safety' AND override_reason='severity_miscalibrated';")
+assert_eq "M4: severity_miscalibrated evidence from a single resolving session is gated (low_confidence=1, sentinel quarantine)" \
+    "$ROW" "1|${_INTERSPECT_LOW_CONFIDENCE_SENTINEL}"
+
+RESULT=$(_interspect_is_routing_eligible fd-safety) || true
+assert_contains "M4: single-session severity_miscalibrated evidence does NOT drive agent_wrong routing eligibility by itself" "$RESULT" "not_eligible"
+
+# A second, independent resolving session hitting the SAME finding
+# corroborates it exactly like a manual correction would, once the event
+# producer supplies a matching review_run_id (accepted via optional
+# .review_run_id on the event; absent today, so this row stays gated on its
+# own finding_id-only key until a producer-side follow-up threads one
+# through — see the fix comment in lib-interspect.sh).
+EVENT_JSON_2=$(jq -n '{
+    id: "evt-m4-2",
+    finding_id: "P1-4",
+    resolution: "accepted",
+    chosen_severity: "P0",
+    impact: "severity_overridden",
+    dismissal_reason: "",
+    session_id: "sess-resolver-2",
+    agents_json: {"fd-safety": "P1"}
+}')
+_interspect_process_disagreement_event "$EVENT_JSON_2" 2>/dev/null || true
+ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source='fd-safety' AND override_reason='severity_miscalibrated' AND low_confidence=1 AND corroborated_at > 0;")
+assert_eq "M4: a second independent resolving session on the same finding corroborates the gate" "$ROWS" "2"
+
+echo ""
 echo "=== Existing (non-flagged) behaviour is unchanged ==="
 
 sqlite3 "$DB" "DELETE FROM evidence;"
