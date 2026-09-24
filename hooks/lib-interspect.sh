@@ -3283,8 +3283,8 @@ _interspect_low_confidence_gate_stats() {
     sqlite3 -separator '|' "$db" "
         SELECT
             COUNT(*),
-            SUM(CASE WHEN corroborated_at > 0 THEN 1 ELSE 0 END),
-            SUM(CASE WHEN corroborated_at = 0 THEN 1 ELSE 0 END)
+            COALESCE(SUM(CASE WHEN corroborated_at > 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN corroborated_at = 0 THEN 1 ELSE 0 END), 0)
         FROM evidence WHERE low_confidence = 1;
     "
 }
