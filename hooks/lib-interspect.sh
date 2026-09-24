@@ -3108,6 +3108,19 @@ _interspect_insert_evidence() {
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || return 1
 
+    # Low-confidence gate (Sylveste-06i.4 Option A): read BEFORE sanitize, from
+    # the raw context the caller passed. A synthesis-produced finding sets
+    # context.low_confidence=true (severity boundary or single-judge P0/P1
+    # call) and, when it wants corroboration tracked, context.finding_id.
+    # Malformed/absent context fails open (gate not applied) — never blocks
+    # evidence recording.
+    local is_low_confidence=0
+    local finding_id=""
+    if command -v jq >/dev/null 2>&1; then
+        [[ "$(jq -r '.low_confidence // false' <<<"$context_json" 2>/dev/null)" == "true" ]] && is_low_confidence=1
+        finding_id=$(jq -r '.finding_id // empty' <<<"$context_json" 2>/dev/null) || finding_id=""
+    fi
+
     # Sanitize user-controlled fields
     source=$(_interspect_sanitize "$source")
     event=$(_interspect_sanitize "$event")
