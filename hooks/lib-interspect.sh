@@ -3200,6 +3200,44 @@ _interspect_insert_evidence() {
     fi
 }
 
+# Explicitly corroborate a gated low-confidence finding, lifting the gate
+# without requiring a second _interspect_insert_evidence call (e.g. a
+# re-judge pass or an explicit human confirmation records corroboration this
+# way instead of a second override). Args: $1=source (agent), $2=finding_id.
+# Output: count of rows corroborated (0 if none were gated for that finding).
+_interspect_corroborate_evidence() {
+    local source="$1" finding_id="$2"
+    [[ -n "$source" && -n "$finding_id" ]] || return 1
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || return 1
+    local e_source e_finding_id now
+    e_source=$(_interspect_sql_escape "$source")
+    e_finding_id=$(_interspect_sql_escape "$finding_id")
+    now=$(date +%s)
+    local affected
+    affected=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${e_source}' AND low_confidence = 1 AND corroborated_at = 0 AND json_extract(context, '\$.finding_id') = '${e_finding_id}';" 2>/dev/null) || affected=0
+    if [[ "${affected:-0}" -gt 0 ]]; then
+        _interspect_sqlite_write "$db" "UPDATE evidence SET quarantine_until = 0, corroborated_at = ${now} WHERE source = '${e_source}' AND low_confidence = 1 AND corroborated_at = 0 AND json_extract(context, '\$.finding_id') = '${e_finding_id}';" >/dev/null || true
+    fi
+    echo "$affected"
+}
+
+# Low-confidence gate stats (Sylveste-06i.4 Option A → Option B decision
+# data): how many findings the gate flagged vs how many were later
+# corroborated. Not gated on quarantine (this is instrumentation, not a
+# routing query). Output: "flagged|corroborated|still_gated".
+_interspect_low_confidence_gate_stats() {
+    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || return 1
+    sqlite3 -separator '|' "$db" "
+        SELECT
+            COUNT(*),
+            SUM(CASE WHEN corroborated_at > 0 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN corroborated_at = 0 THEN 1 ELSE 0 END)
+        FROM evidence WHERE low_confidence = 1;
+    "
+}
+
 # ─── Session Source Classification (Calibration v2) ──────────────────────────
 
 # Classify a session's source type for weighting in calibration.
