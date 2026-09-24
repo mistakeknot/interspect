@@ -64,7 +64,9 @@ echo "=== Schema migration: existing pre-gate-schema DB (M5.i) ==="
 # copy of the plugin would have left it, then run _interspect_ensure_db and
 # confirm the migration adds the columns with safe defaults and existing rows
 # stay equally eligible (matches the round-1 reviewer's own probe).
-OLD_DB="$TEST_DIR/.clavain/interspect/old-schema.db"
+OLD_PROJECT_DIR="$TEST_DIR/old-project"
+mkdir -p "$OLD_PROJECT_DIR/.clavain/interspect"
+OLD_DB="$OLD_PROJECT_DIR/.clavain/interspect/interspect.db"
 sqlite3 "$OLD_DB" "
     CREATE TABLE evidence (
         ts TEXT, session_id TEXT, seq INTEGER, source TEXT, source_version TEXT,
@@ -76,7 +78,7 @@ sqlite3 "$OLD_DB" "
     INSERT INTO evidence (ts, session_id, seq, source, event, override_reason, context, project)
     VALUES ('2026-01-01T00:00:01Z', 'old-sess-2', 2, 'fd-old', 'override', 'agent_wrong', '{}', 'test');
 "
-_INTERSPECT_DB="$OLD_DB" _interspect_ensure_db
+CLAUDE_PROJECT_DIR="$OLD_PROJECT_DIR" _interspect_ensure_db
 
 for col in low_confidence corroborated_at finding_key; do
     COL_COUNT=$(sqlite3 "$OLD_DB" "SELECT COUNT(*) FROM pragma_table_info('evidence') WHERE name = '$col';")
@@ -85,7 +87,7 @@ done
 OLD_ROWS=$(sqlite3 "$OLD_DB" "SELECT low_confidence, corroborated_at, finding_key FROM evidence WHERE source='fd-old' ORDER BY seq;")
 assert_eq "old-schema DB: pre-existing rows got safe defaults (0/0/NULL)" "$OLD_ROWS" "0|0|
 0|0|"
-RESULT=$(_INTERSPECT_DB="$OLD_DB" _interspect_is_routing_eligible fd-old) || true
+RESULT=$(CLAUDE_PROJECT_DIR="$OLD_PROJECT_DIR" _interspect_is_routing_eligible fd-old) || true
 assert_eq "old-schema DB: pre-existing evidence equally eligible after migration" "$RESULT" "eligible"
 
 echo ""
