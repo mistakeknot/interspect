@@ -286,6 +286,12 @@ ALTER TABLE evidence ADD COLUMN quarantine_until INTEGER DEFAULT 0;
 ALTER TABLE evidence ADD COLUMN low_confidence INTEGER DEFAULT 0;
 ALTER TABLE evidence ADD COLUMN corroborated_at INTEGER DEFAULT 0;
 
+-- Real finding_key column (round-2 M1/M3 fix): first-class, indexed
+-- corroboration key (namespaced review_id:finding_id) instead of
+-- json_extract on the (possibly sanitized/truncated) context column.
+ALTER TABLE evidence ADD COLUMN finding_key TEXT;
+CREATE INDEX IF NOT EXISTS idx_evidence_finding_key ON evidence(source, finding_key);
+
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     start_ts TEXT NOT NULL,
