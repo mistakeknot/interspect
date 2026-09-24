@@ -32,6 +32,13 @@
 [[ -n "${_LIB_INTERSPECT_LOADED:-}" ]] && return 0
 _LIB_INTERSPECT_LOADED=1
 
+# Low-confidence gate sentinel (Sylveste-06i.4 Option A): quarantine_until
+# value used for evidence flagged context.low_confidence=true, so it never
+# expires via the normal time-based decay — only explicit corroboration
+# (see _interspect_insert_evidence, _interspect_corroborate_evidence) clears
+# it. 4102444800 = 2100-01-01T00:00:00Z.
+_INTERSPECT_LOW_CONFIDENCE_SENTINEL=4102444800
+
 # ─── Path helpers ────────────────────────────────────────────────────────────
 
 # Returns the path to the Interspect SQLite database.
