@@ -29,19 +29,21 @@ Default to `agent_wrong` if the user doesn't specify.
 
 If the description references a flux-drive finding ID (e.g. `P0-3`) and a `findings.json` from that run is known, check whether the finding carries the severity-tier confidence gate (`docs/spec/core/synthesis.md` Step 4a in interflux).
 
-`FINDINGS_JSON` is the newest `findings.json` under the flux-drive output directory for the current project (e.g. `find . -path '*/flux-drive/*/findings.json' -newer <marker> 2>/dev/null | sort | tail -1`, or whatever the caller already has in scope from the run that produced this finding). `REVIEW_ID` is that output directory's basename — it namespaces `FINDING_ID` so two different runs' `P0-1` are never treated as the same finding (flux-drive IDs are positional per run and otherwise collide across runs):
+`FINDINGS_JSON` is the newest `findings.json` under the flux-drive output directory for the current project (e.g. `find . -path '*/flux-drive/*/findings.json' -newer <marker> 2>/dev/null | sort | tail -1`, or whatever the caller already has in scope from the run that produced this finding). `REVIEW_ID` identifies that specific *run* — it namespaces `FINDING_ID` so two different runs' `P0-1` are never treated as the same finding (flux-drive IDs are positional per run and otherwise collide across runs). The output directory's basename alone is NOT enough: flux-drive deliberately keeps that basename stable across reruns of the same target, so two reruns would otherwise collide. `_interspect_review_id_from_findings` (in `hooks/lib-interspect.sh`, sourced below) appends the run's `synthesis_timestamp` to the basename so reruns never share a `REVIEW_ID` (Sylveste-06i.4 round-2 M1):
 
 ```bash
 FINDING_ID=""   # e.g. "P0-3", parsed from the description if present
-REVIEW_ID=""    # basename of the flux-drive output dir that produced FINDING_ID
+REVIEW_ID=""    # per-run id: <output-dir basename>@<synthesis_timestamp>
 LOW_CONFIDENCE="false"
 if [[ -n "$FINDING_ID" && -f "$FINDINGS_JSON" ]] && command -v jq &>/dev/null; then
     LOW_CONFIDENCE=$(jq -r --arg id "$FINDING_ID" \
         '(.findings[] | select(.id == $id) | .low_confidence) // false' \
         "$FINDINGS_JSON" 2>/dev/null) || LOW_CONFIDENCE="false"
-    [[ -z "$REVIEW_ID" ]] && REVIEW_ID="$(basename "$(dirname "$FINDINGS_JSON")")"
+    [[ -z "$REVIEW_ID" ]] && REVIEW_ID="$(_interspect_review_id_from_findings "$FINDINGS_JSON")"
 fi
 ```
+
+(`_interspect_review_id_from_findings` is defined by `hooks/lib-interspect.sh`, sourced in the "Record Evidence" step below — sequence the lookup after sourcing if adapting this snippet.)
 
 This is best-effort — if no finding ID is identifiable or no `findings.json` is in scope, `LOW_CONFIDENCE` stays `"false"` and the correction is recorded exactly as before. Never block on this lookup. If `LOW_CONFIDENCE` is true but `REVIEW_ID` could not be determined, still pass `finding_id` through (the row is gated, fail-safe) but omit `review_id` — such a row can only be lifted via explicit `_interspect_corroborate_evidence`, never by a second correction, since an un-namespaced key never self-matches.
 
