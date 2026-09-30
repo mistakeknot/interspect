@@ -10,7 +10,7 @@ Agent performance profiler and routing optimizer — 0 skills, 18 commands, 0 ag
 
 ```bash
 # Test locally
-claude --plugin-dir /home/mk/projects/Demarch/interverse/interspect
+claude --plugin-dir /home/mk/projects/Sylveste/interverse/interspect
 
 # Validate structure
 ls commands/*.md | wc -l              # Should be 18
