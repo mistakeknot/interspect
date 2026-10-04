@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Re-measure skill-calibration signal coverage against the live ~/.claude/audit.log.
 #
-# Scheduled via zklw cron for ~2026-07-05 (beads sylveste-ysny / sylveste-7aj8.9):
+# Scheduled via cron for ~2026-07-05 (skill-calibration collector coverage follow-up):
 # checks whether current-session data accumulated since the audit.log producer was
 # revived (2026-06-21) raised behavioral-signal coverage above the ~3% baseline.
 #
