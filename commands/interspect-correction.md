@@ -46,7 +46,7 @@ source "$INTERSPECT_LIB"
 
 If the description references a flux-drive finding ID (e.g. `P0-3`) and a `findings.json` from that run is known, check whether the finding carries the severity-tier confidence gate (`docs/spec/core/synthesis.md` Step 4a in interflux).
 
-`FINDINGS_JSON` is the newest `findings.json` under the flux-drive output directory for the current project (e.g. `find . -path '*/flux-drive/*/findings.json' -newer <marker> 2>/dev/null | sort | tail -1`, or whatever the caller already has in scope from the run that produced this finding). `REVIEW_ID` identifies that specific *run* — it namespaces `FINDING_ID` so two different runs' `P0-1` are never treated as the same finding (flux-drive IDs are positional per run and otherwise collide across runs). The output directory's basename alone is NOT enough: flux-drive deliberately keeps that basename stable across reruns of the same target, so two reruns would otherwise collide. `_interspect_review_id_from_findings` (defined by the library sourced above) appends the run's `synthesis_timestamp` to the basename so reruns never share a `REVIEW_ID` (Sylveste-06i.4 round-2 M1):
+`FINDINGS_JSON` is the newest `findings.json` under the flux-drive output directory for the current project (e.g. `find . -path '*/flux-drive/*/findings.json' -newer <marker> 2>/dev/null | sort | tail -1`, or whatever the caller already has in scope from the run that produced this finding). `REVIEW_ID` identifies that specific *run* — it namespaces `FINDING_ID` so two different runs' `P0-1` are never treated as the same finding (flux-drive IDs are positional per run and otherwise collide across runs). The output directory's basename alone is NOT enough: flux-drive deliberately keeps that basename stable across reruns of the same target, so two reruns would otherwise collide. `_interspect_review_id_from_findings` (defined by the library sourced above) appends the run's `synthesis_timestamp` to the basename so reruns never share a `REVIEW_ID` (round-2 M1):
 
 ```bash
 FINDING_ID=""   # e.g. "P0-3", parsed from the description if present
@@ -68,7 +68,7 @@ This is best-effort — if no finding ID is identifiable or no `findings.json` i
 _interspect_ensure_db
 
 # Build context JSON (use jq for proper escaping). low_confidence/finding_id/
-# review_id are the severity-tier confidence gate fields (Sylveste-06i.4) —
+# review_id are the severity-tier confidence gate fields —
 # when set, lib-interspect.sh quarantines this evidence until a second
 # independent correction with a MATCHING override_reason corroborates the
 # same review_id:finding_id (a bare finding_id is positional per run and

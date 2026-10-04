@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for sylveste-7aj8.3: skill-signal collectors (scripts/signals/).
+# Tests: skill-signal collectors (scripts/signals/).
 #
 # Each collector reads pending skill evidence rows (source_kind='skill', no
 # matching skill_signals row for its signal_kind) and writes one normalized

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ingest skill invocations into the Interspect evidence store (sylveste-7aj8.2).
+"""Ingest skill invocations into the Interspect evidence store.
 
 Source-agnostic adapter: drains `tool: "Skill"` rows from a tool-invocation
 log and `intermesh.route.v1` receipts into the evidence store:

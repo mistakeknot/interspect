@@ -142,7 +142,7 @@ applying `modifications.id`): the trigger is **any single signal regressing >20%
 the composite regressing >10%**, evaluated each calibrate cycle via
 `_interspect_evaluate_skill_canary` → auto-revert.
 
-## Skill Calibration (sylveste-7aj8)
+## Skill Calibration
 
 Generalizes the routing loop from `source_kind='agent'` to skills. Pipeline:
 
@@ -218,7 +218,7 @@ Evidence and calibration data (C2) follow intermem's decay model:
 
 **Standard pattern:** Grace period → linear exclusion → no hysteresis needed (evidence is append-only, not demotable). Interspect uses a 90-day rolling window rather than per-entry decay because evidence is statistical — individual records don't go "stale," but old aggregate patterns lose relevance.
 
-## Signed Evidence (moat play — sylveste-ewy3.5.4)
+## Signed Evidence (moat play)
 
 Interspect can emit **HMAC-signed action receipts** for routing-calibration events, turning its evidence trail into portable, third-party-verifiable proof. This is the "every action produces evidence" principle made cryptographic. See `docs/canon/signed-receipts-v1.md` for the receipt schema, canonicalization, and trust model.
 

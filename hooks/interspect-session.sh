@@ -59,14 +59,14 @@ fi
 # Consume kernel events (catch up since last session)
 _interspect_consume_kernel_events "$SESSION_ID" 2>/dev/null || true
 
-# Skill evidence catch-up ingest (sylveste-7aj8.2): drain any Skill rows
+# Skill evidence catch-up ingest: drain any Skill rows
 # accumulated since the last run into evidence + skill_signals. Backgrounded
 # and fail-open so it never delays or breaks session start.
 if command -v python3 &>/dev/null; then
     ( python3 "${SCRIPT_DIR}/../scripts/ingest-skill-audit.py" \
         --db "$_INTERSPECT_DB" >/dev/null 2>&1 || true ) &
 
-    # Skill-signal collectors (sylveste-7aj8.3): normalize pending skill
+    # Skill-signal collectors: normalize pending skill
     # evidence into skill_signals. The slow collectors (bead_close, no_redirect,
     # tokens) read .beads/issues.jsonl, session transcripts, and cass — all
     # fail-open. Backgrounded and capped via --limit so session start stays
@@ -112,7 +112,7 @@ _interspect_sweep_verdicts "${_SWEEP_ROOT}/.clavain/verdicts" "$SESSION_ID" 2>/d
 # Check for canary alerts — evaluate completed canaries first
 _interspect_check_canaries >/dev/null 2>&1 || true
 
-# Build session-start summary (iv-m6cd): active overrides + canary alerts
+# Build session-start summary: active overrides + canary alerts
 SUMMARY_PARTS=()
 
 # Active routing overrides

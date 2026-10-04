@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared helpers for skill-signal collectors (sylveste-7aj8.3).
+"""Shared helpers for skill-signal collectors.
 
 Each collector under ``scripts/signals/`` reads *pending* skill evidence rows —
 ``evidence`` rows with ``source_kind='skill'`` whose matching

@@ -92,8 +92,3 @@ echo '0 9 1 */3 * cd ~/projects/Sylveste && python3 interverse/interspect/script
 The audit is read-only (snapshots are made by `/interspect:calibrate`,
 not by this command), so it's safe to run at any frequency.
 
-## Related
-
-- Source finding: [Track-C distant review](../../../../docs/research/flux-review/improve-toolchain-1d7a8b22/track-c-distant.md) — "Causal Loop Blindness"
-- Synthesis: [SYNTHESIS.md Action 8](../../../../docs/research/flux-review/improve-toolchain-1d7a8b22/SYNTHESIS.md)
-- Bead: `Sylveste-xr3`

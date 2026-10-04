@@ -21,20 +21,20 @@
 #   _interspect_get_overlay_eligible — agents eligible for overlay proposals (ready + 40-79% wrong)
 #   _interspect_is_cross_cutting — check if agent is structural/cross-cutting
 #   _interspect_apply_propose — write "propose" entry to routing-overrides.json
-#   _interspect_rate_limit_exceeded — check global modification rate limit (iv-003t)
+#   _interspect_rate_limit_exceeded — check global modification rate limit
 #   _interspect_same_session_proposed — check if current session proposed the override (iv-drgo)
-#   _interspect_reset          — wipe evidence/canary/modifications data (iv-g0to)
+#   _interspect_reset          — wipe evidence/canary/modifications data
 #   _interspect_flock_git     — serialized git operations via flock
 #   _interspect_compute_delegation_stats — per-category delegation pass rates (B4)
 #   _interspect_write_delegation_calibration — write delegation-calibration.json (B4)
-#   _interspect_corroborate_evidence — lift a low-confidence gate once another judge/person corroborates (Sylveste-06i.4)
-#   _interspect_low_confidence_gate_stats — flagged/corroborated/still-gated counts for the low-confidence gate (Sylveste-06i.4)
+#   _interspect_corroborate_evidence — lift a low-confidence gate once another judge/person corroborates
+#   _interspect_low_confidence_gate_stats — flagged/corroborated/still-gated counts for the low-confidence gate
 
 # Guard against re-parsing (same pattern as lib-signals.sh)
 [[ -n "${_LIB_INTERSPECT_LOADED:-}" ]] && return 0
 _LIB_INTERSPECT_LOADED=1
 
-# Low-confidence gate sentinel (Sylveste-06i.4 Option A): quarantine_until
+# Low-confidence gate sentinel (Option A): quarantine_until
 # value used for evidence flagged context.low_confidence=true, so it never
 # expires via the normal time-based decay — only explicit corroboration
 # (see _interspect_insert_evidence, _interspect_corroborate_evidence) clears
@@ -157,14 +157,14 @@ MIGRATE
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE sessions ADD COLUMN run_id TEXT;" 2>/dev/null || true
         # Add source column to sessions (calibration v2: source weighting)
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE sessions ADD COLUMN source TEXT DEFAULT 'normal';" 2>/dev/null || true
-        # Add lineage columns to evidence (iv-w3ee6)
+        # Add lineage columns to evidence
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN source_event_id TEXT;" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN source_table TEXT;" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN raw_override_reason TEXT;" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_source_event_id ON evidence(source_event_id);" 2>/dev/null || true
         # Add quarantine column to evidence (rsj.1.4: evidence quarantine)
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN quarantine_until INTEGER DEFAULT 0;" 2>/dev/null || true
-        # Add low-confidence gate columns to evidence (Sylveste-06i.4 Option A)
+        # Add low-confidence gate columns to evidence (Option A)
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN low_confidence INTEGER DEFAULT 0;" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN corroborated_at INTEGER DEFAULT 0;" 2>/dev/null || true
         # Real finding_key column (round-2 M1/M3 fix): a first-class, indexed
@@ -175,12 +175,12 @@ MIGRATE
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN finding_key TEXT;" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_finding_key ON evidence(source, finding_key);" 2>/dev/null || true
         # Add source_kind discriminator (sylveste-sfhq.1: telemetry fusion)
-        # Allowed values: agent | tool | pattern | skill (skill added sylveste-7aj8.1).
+        # Allowed values: agent | tool | pattern | skill (skill added later).
         # CHECK constraint can't be added by ALTER TABLE in SQLite — enforced at insert
         # time in _interspect_insert_evidence.
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'agent';" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_source_kind ON evidence(source_kind, source);" 2>/dev/null || true
-        # Skill-calibration schema (sylveste-7aj8.1): goals + signals + audit cursor
+        # Skill-calibration schema: goals + signals + audit cursor
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE sessions ADD COLUMN last_skill_audit_ts TEXT;" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" <<'SKILLMIGRATE' 2>/dev/null || true
 CREATE TABLE IF NOT EXISTS skill_goals (
@@ -265,7 +265,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     source_kind TEXT NOT NULL DEFAULT 'agent' CHECK (source_kind IN ('agent','tool','pattern','skill'))
 );
 
--- Lineage columns (added iv-w3ee6): trace evidence back to kernel events
+-- Lineage columns (added later): trace evidence back to kernel events
 ALTER TABLE evidence ADD COLUMN source_event_id TEXT;
 ALTER TABLE evidence ADD COLUMN source_table TEXT;
 ALTER TABLE evidence ADD COLUMN raw_override_reason TEXT;
@@ -275,7 +275,7 @@ CREATE INDEX IF NOT EXISTS idx_evidence_source_event_id ON evidence(source_event
 -- calculations until quarantine_until epoch passes. Default 0 = no quarantine.
 ALTER TABLE evidence ADD COLUMN quarantine_until INTEGER DEFAULT 0;
 
--- Low-confidence gate columns (Sylveste-06i.4 Option A): a caller flags
+-- Low-confidence gate columns (Option A): a caller flags
 -- evidence as low_confidence=1 (via context.low_confidence) when it
 -- originates from a severity-boundary or single-judge P0/P1 flux-drive
 -- finding. Such rows get quarantine_until set to a far-future sentinel
@@ -393,7 +393,7 @@ CREATE TABLE IF NOT EXISTS skill_signals (
 CREATE INDEX IF NOT EXISTS idx_skill_signals_name ON skill_signals(skill_name, signal_kind);
 CREATE INDEX IF NOT EXISTS idx_skill_signals_session ON skill_signals(session_id);
 
--- Skill canary samples (sylveste-7aj8.7): per-invocation per-signal deltas vs.
+-- Skill canary samples: per-invocation per-signal deltas vs.
 -- the pre-overlay baseline, keyed by the modifications.id that applied the
 -- overlay. Deliberately SEPARATE from canary_samples (which is agent/tool-shaped:
 -- override_rate/fp_rate/finding_density keyed by canary_id). per_signal_delta =
@@ -418,9 +418,9 @@ CREATE TABLE IF NOT EXISTS sentinels (
     value TEXT NOT NULL
 );
 SQL
-    # Migration: add cohort columns to canary table (iv-f7gsz)
+    # Migration: add cohort columns to canary table
     # Uses $_INTERSPECT_DB (the function-scoped DB var); $db is local to *other* functions
-    # and unset here. Bug fix: sylveste-3hyi.
+    # and unset here. Bug fix.
     sqlite3 "$_INTERSPECT_DB" "ALTER TABLE canary ADD COLUMN project TEXT DEFAULT '';" 2>/dev/null || true
     sqlite3 "$_INTERSPECT_DB" "ALTER TABLE canary ADD COLUMN cohort_key TEXT DEFAULT '';" 2>/dev/null || true
 
@@ -637,7 +637,7 @@ _interspect_load_confidence() {
     # Circuit breaker: max reverts before disabling autonomy for a target
     _INTERSPECT_CIRCUIT_BREAKER_MAX=3
     _INTERSPECT_CIRCUIT_BREAKER_DAYS=30
-    # Rate limiter (iv-003t): max modifications per rolling window
+    # Rate limiter: max modifications per rolling window
     _INTERSPECT_RATE_LIMIT_MAX=5
     _INTERSPECT_RATE_LIMIT_HOURS=24
 
@@ -663,7 +663,7 @@ _interspect_load_confidence() {
         _INTERSPECT_CIRCUIT_BREAKER_MAX=$(jq -r '.circuit_breaker_max // 3' "$conf")
         _INTERSPECT_CIRCUIT_BREAKER_DAYS=$(jq -r '.circuit_breaker_days // 30' "$conf")
 
-        # Rate limiter (iv-003t)
+        # Rate limiter
         _INTERSPECT_RATE_LIMIT_MAX=$(jq -r '.rate_limit_max // 5' "$conf")
         _INTERSPECT_RATE_LIMIT_HOURS=$(jq -r '.rate_limit_hours // 24' "$conf")
     fi
@@ -690,7 +690,7 @@ _interspect_load_confidence() {
     _INTERSPECT_CIRCUIT_BREAKER_MAX=$(_interspect_clamp_int "${_INTERSPECT_CIRCUIT_BREAKER_MAX:-3}" 1 100 3)
     _INTERSPECT_CIRCUIT_BREAKER_DAYS=$(_interspect_clamp_int "${_INTERSPECT_CIRCUIT_BREAKER_DAYS:-30}" 1 365 30)
 
-    # Rate limiter bounds (iv-003t)
+    # Rate limiter bounds
     _INTERSPECT_RATE_LIMIT_MAX=$(_interspect_clamp_int "${_INTERSPECT_RATE_LIMIT_MAX:-5}" 1 50 5)
     _INTERSPECT_RATE_LIMIT_HOURS=$(_interspect_clamp_int "${_INTERSPECT_RATE_LIMIT_HOURS:-24}" 1 168 24)
 }
@@ -1309,7 +1309,7 @@ _interspect_apply_override_locked() {
         local ts
         ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-        # Check for overlapping canaries (iv-f7gsz: cohort-scoped overlap blocking)
+        # Check for overlapping canaries (cohort-scoped overlap blocking)
         local overlap_result
         overlap_result=$(_interspect_check_canary_overlap "$agent" "") || true
         case "${overlap_result%%|*}" in
@@ -1330,7 +1330,7 @@ _interspect_apply_override_locked() {
         _interspect_sqlite_write "$db" "INSERT INTO modifications (group_id, ts, tier, mod_type, target_file, commit_sha, confidence, evidence_summary, status)
             VALUES ('${escaped_agent}', '${ts}', 'persistent', 'routing', '${filepath}', '${commit_sha}', ${confidence}, '${escaped_reason}', 'applied');"
 
-        # Canary record — baseline + INSERT (iv-f7gsz: agent-scoped)
+        # Canary record — baseline + INSERT (agent-scoped)
         _interspect_create_canary_record "$db" "$filepath" "$escaped_agent" "$commit_sha" "$ts" "$agent" "$agent"
     else
         echo "INFO: Metadata updated for existing override. No new canary." >&2
@@ -1692,7 +1692,7 @@ _interspect_approve_override_locked() {
         echo "WARN: Modification record insert failed — override is active but untracked." >&2
     fi
 
-    # 9. Overlap check (iv-f7gsz)
+    # 9. Overlap check
     local overlap_result
     overlap_result=$(_interspect_check_canary_overlap "$agent" "") || true
     case "${overlap_result%%|*}" in
@@ -1709,7 +1709,7 @@ _interspect_approve_override_locked() {
             ;;
     esac
 
-    # 10. Canary record — baseline + INSERT (iv-f7gsz: agent-scoped)
+    # 10. Canary record — baseline + INSERT (agent-scoped)
     _interspect_create_canary_record "$db" "$escaped_filepath" "$escaped_agent" "$commit_sha" "$ts" "$agent" "$agent"
 
     # 11. Output commit SHA (last line, captured by caller)
@@ -1966,7 +1966,7 @@ _interspect_system_breaker_check() {
     return 1
 }
 
-# ─── Rate Limiter (iv-003t) ──────────────────────────────────────────────────
+# ─── Rate Limiter ──────────────────────────────────────────────────
 
 # Check global modification rate limit: too many modifications in rolling window?
 # Prevents runaway autonomous modifications by capping total changes system-wide.
@@ -2039,7 +2039,7 @@ _interspect_should_auto_apply() {
         return 1
     fi
 
-    # Rate limiter (iv-003t): too many modifications globally → force propose
+    # Rate limiter: too many modifications globally → force propose
     if _interspect_rate_limit_exceeded; then
         echo "INFO: Rate limit exceeded (${_INTERSPECT_RATE_LIMIT_MAX} mods/${_INTERSPECT_RATE_LIMIT_HOURS}h) — forcing propose mode." >&2
         return 1
@@ -2069,7 +2069,7 @@ _interspect_should_auto_apply() {
     return 0
 }
 
-# ─── Reset (iv-g0to) ─────────────────────────────────────────────────────────
+# ─── Reset ─────────────────────────────────────────────────────────
 
 # Reset interspect state: wipe evidence, modifications, canary tables.
 # Preserves the sessions table and confidence.json (human-owned config).
@@ -2193,7 +2193,7 @@ _interspect_compute_canary_baseline() {
         project_filter="AND project = '${escaped_project}'"
     fi
 
-    # Build optional agent filter (iv-f7gsz: cohort-scoped baselines)
+    # Build optional agent filter (cohort-scoped baselines)
     local agent_filter=""
     local escaped_agent=""
     if [[ -n "$agent" ]]; then
@@ -2313,7 +2313,7 @@ _interspect_record_canary_sample() {
     local ts
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    # Insert sample for each active canary — agent-scoped (iv-f7gsz)
+    # Insert sample for each active canary — agent-scoped
     local row canary_id canary_agent
     while IFS= read -r row; do
         [[ -z "$row" ]] && continue
@@ -2368,7 +2368,7 @@ _interspect_record_canary_sample() {
     return 0
 }
 
-# Check for overlapping active canaries before creating a new one (iv-f7gsz).
+# Check for overlapping active canaries before creating a new one.
 # Same agent + active canary → BLOCK (cannot attribute effect).
 # Different agent, same project → WARN (advisory, not blocking).
 # Args: $1=agent, $2=project (optional)
@@ -2545,7 +2545,7 @@ _interspect_evaluate_canary() {
     escaped_verdict_reason=$(_interspect_sql_escape "$verdict_reason")
     _interspect_sqlite_write "$db" "UPDATE canary SET status = '${verdict}', verdict_reason = '${escaped_verdict_reason}' WHERE id = ${canary_id};"
 
-    # Check for multiple active canaries — list specific agents (iv-f7gsz)
+    # Check for multiple active canaries — list specific agents
     local active_count overlap_note=""
     active_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM canary WHERE status = 'active' AND id != ${canary_id};")
     if (( active_count > 0 )); then
@@ -2681,7 +2681,7 @@ _interspect_process_disagreement_event() {
     session_id=$(echo "$event_json" | jq -r '.session_id // "unknown"') || return 0
     # Round-2 M4: optional per-run identity, when the producer supplies one
     # (e.g. Clavain resolve.md's review_run_id), used to namespace finding_key
-    # exactly like the manual correction path (Sylveste-06i.4 M1). Absent for
+    # exactly like the manual correction path (M1). Absent for
     # today's producer — see the low_confidence block below.
     review_run_id=$(echo "$event_json" | jq -r '.review_run_id // empty') || review_run_id=""
 
@@ -2716,7 +2716,7 @@ _interspect_process_disagreement_event() {
         # Only create evidence for agents whose severity was overridden
         [[ "$agent_severity" == "$chosen_severity" ]] && continue
 
-        # Round-2 M4 (Sylveste-06i.4): the severity_miscalibrated branch sets
+        # Round-2 M4: the severity_miscalibrated branch sets
         # chosen_severity to the mechanical max of the panel's own ratings
         # (synthesis.md Rule 4) — no adjudication beyond the conflicting
         # panel itself. That is exactly the boundary-noise case Option A
@@ -2851,7 +2851,7 @@ _interspect_consume_review_events() {
     fi
 }
 
-# Consume interlab mutation outcomes into interspect evidence (sylveste-ioe7).
+# Consume interlab mutation outcomes into interspect evidence.
 #
 # interlab experimentally measures which hypotheses win for a given task_type
 # (mutations.db, written by mutation_record) but nothing read them — the
@@ -2960,7 +2960,7 @@ _interspect_get_canary_summary() {
 
 _INTERSPECT_GIT_LOCK_TIMEOUT=30
 
-# Hybrid locking (Sylveste-60q): flock(1) when the binary exists (Linux —
+# Hybrid locking: flock(1) when the binary exists (Linux —
 # exact prior semantics), mkdir spin-lock fallback where it doesn't (macOS
 # ships no flock; every write path used to fail with exit 127 there).
 _interspect_have_flock() { command -v flock >/dev/null 2>&1; }
@@ -3109,7 +3109,7 @@ _interspect_validate_hook_id() {
 
 # ─── Evidence insertion ──────────────────────────────────────────────────────
 
-# Round-2 M1 (Sylveste-06i.4): derive a run-scoped review_id from a
+# Round-2 M1: derive a run-scoped review_id from a
 # findings.json path. The output-directory basename ALONE is deliberately
 # stable across reruns of the same target (flux-drive SKILL.md ~128-133), so
 # two independent reruns produced the same review_id and their positional
@@ -3140,7 +3140,7 @@ _interspect_review_id_from_findings() {
 #       $7=source_event_id (optional) $8=source_table (optional) $9=raw_override_reason (optional)
 #       $10=source_kind (optional, default 'agent'; one of: agent | tool | pattern | skill)
 # Emit a signed action receipt for a routing-calibration event (moat play —
-# sylveste-ewy3.5.4). Opt-in via INTERSPECT_SIGNED_RECEIPTS=1; fail-open so a
+# Signed receipts). Opt-in via INTERSPECT_SIGNED_RECEIPTS=1; fail-open so a
 # signing failure never breaks evidence recording. Shells out to `ic receipt
 # emit`, which HMAC-signs the event, self-provisions the per-agent key on first
 # use, and stores the receipt in the intercore DB. Verify with
@@ -3177,7 +3177,7 @@ _interspect_insert_evidence() {
     fi
 
     # Validate source_kind (sylveste-sfhq.1: telemetry fusion)
-    # 'skill' added sylveste-7aj8.2 (DB CHECK already allows it; this bash
+    # 'skill' added later (DB CHECK already allows it; this bash
     # gate was the remaining blocker for bash-path skill inserts).
     case "$source_kind" in
         agent|tool|pattern|skill) ;;
@@ -3187,7 +3187,7 @@ _interspect_insert_evidence() {
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || return 1
 
-    # Low-confidence gate (Sylveste-06i.4 Option A): read BEFORE sanitize, from
+    # Low-confidence gate (Option A): read BEFORE sanitize, from
     # the raw context the caller passed. A synthesis-produced finding sets
     # context.low_confidence=true (severity boundary or single-judge P0/P1
     # call) and, when it wants corroboration tracked, context.finding_id plus
@@ -3260,7 +3260,7 @@ _interspect_insert_evidence() {
     local e_source_kind="${source_kind//\'/\'\'}"
     local e_finding_key="${finding_key//\'/\'\'}"
 
-    # Low-confidence gate (Sylveste-06i.4 Option A): a flagged row is
+    # Low-confidence gate (Option A): a flagged row is
     # quarantined indefinitely (sentinel far past any real quarantine decay)
     # instead of the normal 48h window, so it never drives agent_wrong
     # exclusion on its own — UNLESS this is a second, independent (different
@@ -3292,7 +3292,7 @@ _interspect_insert_evidence() {
 
     _interspect_sqlite_write "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason, quarantine_until, source_kind, low_confidence, corroborated_at, finding_key) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''), ${quarantine_until}, '${e_source_kind}', ${is_low_confidence}, ${corroborated_at}, NULLIF('${e_finding_key}',''));"
 
-    # Moat play (sylveste-ewy3.5.4): emit a signed receipt for routing-override
+    # Moat play: emit a signed receipt for routing-override
     # applications. Opt-in + fail-open; proposal & canary paths are a separate
     # follow-up (distinct code paths). Must never affect evidence recording.
     if [[ "$event" == "override" ]]; then
@@ -3330,7 +3330,7 @@ _interspect_corroborate_evidence() {
     echo "${affected:-0}"
 }
 
-# Low-confidence gate stats (Sylveste-06i.4 Option A → Option B decision
+# Low-confidence gate stats (Option A → Option B decision
 # data): how many findings the gate flagged vs how many were later
 # corroborated. Not gated on quarantine (this is instrumentation, not a
 # routing query). Output: "flagged|corroborated|still_gated".
@@ -3759,7 +3759,7 @@ _interspect_sweep_verdicts() {
         model=$(jq -r '.model // "unknown"' "$verdict_file" 2>/dev/null) || model="unknown"
         phase=$(jq -r '.phase // empty' "$verdict_file" 2>/dev/null) || phase=""
 
-        # Use originating session_id from verdict JSON if available (Demarch-k1b fix).
+        # Use originating session_id from verdict JSON if available (fix).
         # Falls back to sweep session_id for legacy verdicts without the field.
         origin_sid=$(jq -r '.session_id // ""' "$verdict_file" 2>/dev/null) || origin_sid=""
         [[ -z "$origin_sid" ]] && origin_sid="$session_id"
@@ -4573,7 +4573,7 @@ _interspect_write_overlay_locked() {
     # is active. Canary failure should warn, not abort (C-02 fix).
     set +e
 
-    # Overlap check (iv-f7gsz) — advisory only for overlays (git commit already done)
+    # Overlap check — advisory only for overlays (git commit already done)
     # Pass raw $agent (not compound $group_id) to match canary group_id format
     local overlap_result
     overlap_result=$(_interspect_check_canary_overlap "$agent" "") || true
@@ -4590,7 +4590,7 @@ _interspect_write_overlay_locked() {
             ;;
     esac
 
-    # Canary record — baseline + INSERT (iv-f7gsz: agent-scoped baseline, compound group_id)
+    # Canary record — baseline + INSERT (agent-scoped baseline, compound group_id)
     _interspect_load_confidence 2>/dev/null
     _interspect_create_canary_record "$db" "$(_interspect_sql_escape "$rel_path")" "$group_id" "$commit_sha" "$ts" "$agent" "$group_id"
 
@@ -5409,7 +5409,7 @@ _interspect_disable_tool_remediation() {
     return 0
 }
 
-# ─── Skill calibration: tune overlays + canary + autonomy (sylveste-7aj8.6/.7) ─
+# ─── Skill calibration: tune overlays + canary + autonomy ─
 #
 # Third source_kind in the tune family, after agent overlays (sfhq.3) and tool
 # remediations (sfhq.4). Differences from those precedents:
