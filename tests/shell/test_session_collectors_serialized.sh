@@ -15,10 +15,12 @@ command -v flock &>/dev/null || { echo "SKIP: flock not available"; exit 0; }
 command -v nice &>/dev/null || { echo "SKIP: nice not available"; exit 0; }
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TEST_DIR=$(mktemp -d)
+TEST_DIR=$(mktemp -d) && [[ -n "$TEST_DIR" && -d "$TEST_DIR" ]] || { echo "FAIL: mktemp -d"; exit 1; }
 cleanup() {
     touch "$TEST_DIR/release" 2>/dev/null   # let any stub collector exit
-    command -v pkill &>/dev/null && pkill -f "$TEST_DIR/plugin/scripts/signals" 2>/dev/null
+    if [[ -f "$TEST_DIR/pids" ]]; then
+        while read -r _pid; do kill "$_pid" 2>/dev/null; done < "$TEST_DIR/pids"
+    fi
     rm -rf "$TEST_DIR"
 }
 trap cleanup EXIT
@@ -32,6 +34,8 @@ for c in collect_bead_close collect_no_redirect collect_tokens; do
 import os, time
 with open(os.environ["STUB_LOG"], "a") as f:
     f.write("$c nice=%d\n" % os.nice(0))
+with open(os.environ["STUB_PIDS"], "a") as f:
+    f.write("%d\n" % os.getpid())
 for _ in range(600):
     if os.path.exists(os.environ["STUB_RELEASE"]):
         break
@@ -40,19 +44,22 @@ PY
 done
 printf 'import sys\n' > "$PLUGIN/scripts/ingest-skill-audit.py"
 
-# flock shim: log each attempt, then run the real flock.
+# flock shim: run the real flock, then log its result (so a logged attempt means
+# the contender has already won or lost the lock).
 REAL_FLOCK=$(command -v flock)
 mkdir -p "$TEST_DIR/bin"
 cat > "$TEST_DIR/bin/flock" <<SH
 #!/usr/bin/env bash
-echo attempt >> "$TEST_DIR/attempts.log"
-exec "$REAL_FLOCK" "\$@"
+"$REAL_FLOCK" "\$@"; rc=\$?
+echo "rc=\$rc" >> "$TEST_DIR/attempts.log"
+exit \$rc
 SH
 chmod +x "$TEST_DIR/bin/flock"
 export PATH="$TEST_DIR/bin:$PATH"
 
 export STUB_LOG="$TEST_DIR/stub.log"
 export STUB_RELEASE="$TEST_DIR/release"
+export STUB_PIDS="$TEST_DIR/pids"
 export CLAUDE_PROJECT_DIR="$TEST_DIR/project"
 mkdir -p "$CLAUDE_PROJECT_DIR/.clavain/interspect"
 (cd "$CLAUDE_PROJECT_DIR" && git init -q .) 2>/dev/null
@@ -89,7 +96,8 @@ echo "=== Concurrent session starts: one collector pass per DB ==="
 for n in 1 2 3 4; do run_hook "sess-$n" & done
 wait
 require "first collector started" 30 first_started
-require "all four contenders attempted the lock" 30 all_attempted 4
+require "all four contenders have won or lost the lock" 30 all_attempted 4
+assert_eq "exactly one contender won the lock" "$(/usr/bin/grep -c "rc=0" "$TEST_DIR/attempts.log")" "1"
 touch "$STUB_RELEASE"
 require "first pass finished and released the lock" 60 pass_done 3
 assert_eq "each collector ran once, not once per session" "$(log_lines)" "3"
