@@ -4,8 +4,10 @@
 # it runs niced. Also: an unwritable lock location must stay silent and
 # fail-open.
 #
-# Synchronization is by files, not fixed sleeps: the stub collectors hold the
-# first pass open until the test releases it, and every wait is a bounded poll.
+# Synchronization is by files, not sleeps: the stub collectors hold the first
+# pass open until the test releases it, a flock shim records every lock attempt
+# so the test releases only after all contenders have tried and lost, and every
+# wait is a bounded poll whose failure is a test failure.
 
 set -uo pipefail
 
@@ -14,7 +16,12 @@ command -v nice &>/dev/null || { echo "SKIP: nice not available"; exit 0; }
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
-trap 'rm -rf "$TEST_DIR"' EXIT
+cleanup() {
+    touch "$TEST_DIR/release" 2>/dev/null   # let any stub collector exit
+    command -v pkill &>/dev/null && pkill -f "$TEST_DIR/plugin/scripts/signals" 2>/dev/null
+    rm -rf "$TEST_DIR"
+}
+trap cleanup EXIT
 
 PLUGIN="$TEST_DIR/plugin"
 mkdir -p "$PLUGIN/hooks" "$PLUGIN/scripts/signals"
@@ -32,6 +39,17 @@ for _ in range(600):
 PY
 done
 printf 'import sys\n' > "$PLUGIN/scripts/ingest-skill-audit.py"
+
+# flock shim: log each attempt, then run the real flock.
+REAL_FLOCK=$(command -v flock)
+mkdir -p "$TEST_DIR/bin"
+cat > "$TEST_DIR/bin/flock" <<SH
+#!/usr/bin/env bash
+echo attempt >> "$TEST_DIR/attempts.log"
+exec "$REAL_FLOCK" "\$@"
+SH
+chmod +x "$TEST_DIR/bin/flock"
+export PATH="$TEST_DIR/bin:$PATH"
 
 export STUB_LOG="$TEST_DIR/stub.log"
 export STUB_RELEASE="$TEST_DIR/release"
@@ -53,6 +71,14 @@ wait_until() {
     local deadline=$((SECONDS + $1)); shift
     until "$@"; do (( SECONDS >= deadline )) && return 1; sleep 0.1; done
 }
+attempts() { [[ -f "$TEST_DIR/attempts.log" ]] && wc -l < "$TEST_DIR/attempts.log" | tr -d ' ' || echo 0; }
+all_attempted() { (( $(attempts) >= $1 )); }
+# require <desc> <seconds> <command...>: a timed-out wait is a test failure.
+require() {
+    local desc="$1" secs="$2"; shift 2
+    if wait_until "$secs" "$@"; then echo "  PASS: $desc"; ((PASS++)) || true
+    else echo "  FAIL: $desc (timed out after ${secs}s)"; ((FAIL++)) || true; fi
+}
 lock_free() { ( exec 8>"$LOCK" && flock -n 8 ) 2>/dev/null; }
 first_started() { [[ -f "$STUB_LOG" ]] && /usr/bin/grep -q collect_bead_close "$STUB_LOG"; }
 pass_done() { [[ "$(log_lines)" == "$1" ]] && lock_free; }
@@ -62,16 +88,16 @@ run_hook() { echo "{\"session_id\":\"$1\"}" | bash "$PLUGIN/hooks/interspect-ses
 echo "=== Concurrent session starts: one collector pass per DB ==="
 for n in 1 2 3 4; do run_hook "sess-$n" & done
 wait
-wait_until 30 first_started || echo "  (first collector never started)"
-sleep 2   # let any skipped passes attempt, and lose, the lock while it is held
+require "first collector started" 30 first_started
+require "all four contenders attempted the lock" 30 all_attempted 4
 touch "$STUB_RELEASE"
-wait_until 60 pass_done 3
+require "first pass finished and released the lock" 60 pass_done 3
 assert_eq "each collector ran once, not once per session" "$(log_lines)" "3"
 assert_eq "collectors ran at nice 19" "$(/usr/bin/grep -c 'nice=19' "$STUB_LOG")" "3"
 
 echo "=== Lock released: a later session runs a fresh pass ==="
 run_hook "sess-5"
-wait_until 60 pass_done 6
+require "second pass finished" 60 pass_done 6
 assert_eq "second pass ran after the first finished" "$(log_lines)" "6"
 
 echo "=== Unwritable lock path: silent and fail-open ==="
