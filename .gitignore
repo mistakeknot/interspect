@@ -11,3 +11,4 @@ __pycache__/
 .clavain/interspect/*.db
 .clavain/interspect/*.db-wal
 .clavain/interspect/*.db-shm
+.clavain/interspect/*.collect.lock

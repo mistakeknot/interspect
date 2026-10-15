@@ -84,7 +84,7 @@ if command -v python3 &>/dev/null; then
     if [[ -d "$_SIGNALS_DIR" ]]; then
         (
             if command -v flock &>/dev/null; then
-                exec 9>"${_INTERSPECT_DB}.collect.lock" || exit 0
+                exec 2>/dev/null 9>"${_INTERSPECT_DB}.collect.lock" || exit 0
                 flock -n 9 || exit 0
             fi
             _LOWPRI=()
