@@ -72,12 +72,27 @@ if command -v python3 &>/dev/null; then
     # fail-open. Backgrounded and capped via --limit so session start stays
     # cheap. The inline 'error' signal is written by ingest, so its catch-up
     # collector is omitted here.
+    #
+    # With many sessions starting at once (parallel agents on one host), each
+    # session used to launch its own copy of these collectors, which read whole
+    # transcripts, and the copies piled up and starved the machine. So only one
+    # catch-up pass runs per DB at a time (non-blocking flock; a session that
+    # loses the race skips, since the running pass drains the same backlog and
+    # the next session retries), and the pass runs at the lowest CPU and I/O
+    # priority. Without flock (e.g. stock macOS) it runs unserialized, as before.
     _SIGNALS_DIR="${SCRIPT_DIR}/../scripts/signals"
     if [[ -d "$_SIGNALS_DIR" ]]; then
         (
+            if command -v flock &>/dev/null; then
+                exec 2>/dev/null 9>"${_INTERSPECT_DB}.collect.lock" || exit 0
+                flock -n 9 || exit 0
+            fi
+            _LOWPRI=()
+            command -v nice &>/dev/null && _LOWPRI+=(nice -n 19)
+            command -v ionice &>/dev/null && _LOWPRI=(ionice -c 3 ${_LOWPRI[@]+"${_LOWPRI[@]}"})
             for _c in collect_bead_close collect_no_redirect collect_tokens; do
-                python3 "${_SIGNALS_DIR}/${_c}.py" --db "$_INTERSPECT_DB" \
-                    --limit 200 >/dev/null 2>&1 || true
+                ${_LOWPRI[@]+"${_LOWPRI[@]}"} python3 "${_SIGNALS_DIR}/${_c}.py" \
+                    --db "$_INTERSPECT_DB" --limit 200 >/dev/null 2>&1 || true
             done
         ) &
     fi
