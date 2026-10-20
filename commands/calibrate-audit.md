@@ -91,4 +91,3 @@ echo '0 9 1 */3 * cd ~/projects/Sylveste && python3 interverse/interspect/script
 
 The audit is read-only (snapshots are made by `/interspect:calibrate`,
 not by this command), so it's safe to run at any frequency.
-

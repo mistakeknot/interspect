@@ -65,8 +65,6 @@ interspect/
 │   └── interspect-session-end.sh # Stop: close session record
 ├── scripts/
 │   └── bump-version.sh
-├── docs/
-│   └── research/                 # Architecture/quality/correctness/safety reviews
 ├── CLAUDE.md
 ├── AGENTS.md                     # This file
 ├── PHILOSOPHY.md
