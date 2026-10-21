@@ -310,21 +310,37 @@ def invalidate_canaries(db, affected_rows):
         value, start, end = map(timestamp, (value, start, end))
         return value is None or start is None or end is None or start <= value <= end
 
+    def source_of(value):
+        try:
+            return normalize_field('source', value)
+        except ValueError:
+            return str(value).lower()
+
+    def historical_sources(row):
+        # A revision-3 repair can clear the canonical identity of an ambiguous
+        # row, so also consult the identity retained in its first audit.
+        values = [row.get('gate_source'), row['source']]
+        audit = db.execute('SELECT previous_row FROM interspect_gate_audit WHERE evidence_id=?',
+                           (row['id'],)).fetchone()
+        if audit:
+            try:
+                previous = json.loads(audit[0])
+            except ValueError:
+                previous = {}
+            values.extend(previous.get(k) for k in ('gate_source', 'source') if isinstance(previous, dict))
+        return {source_of(v) for v in values if v}
+
     invalidated = []
     for canary in dictionaries(db.execute("SELECT * FROM canary WHERE status IN ('active','alert','passed')")):
         samples = dictionaries(db.execute('SELECT * FROM canary_samples WHERE canary_id=?', (canary['id'],)))
         sample_sessions = {s['session_id'].lower() for s in samples}
         affected = set()
+        # Overlay canaries store the compound 'agent/overlay' group_id; the
+        # agent whose evidence backs the baseline is the part before the slash.
+        cohort = source_of(canary['group_id'].split('/', 1)[0]) if canary['group_id'] else None
         for row in affected_rows:
-            try:
-                source = normalize_field('source', row.get('gate_source') or row['source'])
-            except ValueError:
-                source = (row['source'] or '').lower()
-            try:
-                cohort = normalize_field('source', canary['group_id']) if canary['group_id'] else None
-            except ValueError:
-                cohort = canary['group_id'].lower()
-            if cohort and source and source != cohort:
+            sources = historical_sources(row)
+            if cohort and sources and cohort not in sources:
                 continue
             sid = (row.get('gate_session') or row['session_id'] or '').lower()
             times = [row.get('ts')]
@@ -406,6 +422,13 @@ def migrate(db, overrides_path=None):
             "COALESCE(json_extract(previous_row,'$.quarantine_until'),0)<=? "
             "OR json_extract(previous_row,'$.corroborated_at')>0", (now,)))
         exposed_ids.update(r[0] for r in db.execute('SELECT evidence_id FROM interspect_gate_exposed'))
+        # Revision 3 kept no exposure table: a row it audited as held may have
+        # been lifted and re-held by a later repair, leaving the immutable audit
+        # and the current row both looking merely held. Treat it as exposed.
+        exposed_ids.update(r[0] for r in db.execute(
+            "SELECT evidence_id FROM interspect_gate_audit WHERE "
+            "json_extract(previous_row,'$.quarantine_until')=? AND "
+            "COALESCE(json_extract(previous_row,'$.corroborated_at'),0)=0", (SENTINEL,)))
         affected_ids = exposed_ids.intersection(row['id'] for row in rows)
         db.executemany('INSERT OR IGNORE INTO interspect_gate_exposed VALUES (?)',
                        ((evidence_id,) for evidence_id in affected_ids))

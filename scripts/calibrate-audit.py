@@ -40,7 +40,7 @@ from pathlib import Path
 
 # Also support the existing file-based module loader used by snapshot consumers.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from interspect_gate import eligible_sql
+from interspect_gate import eligible_sql, skill_signal_eligible_sql
 
 
 def find_repo_root(start: Path) -> Path:
@@ -215,10 +215,11 @@ def compute_consensus_trend_point(
         defect_escape_rate = None
         if has_skill_signals:
             cur.execute(
-                """
-                SELECT AVG(value) AS avg_value, COUNT(*) AS n
-                FROM skill_signals
-                WHERE signal_kind = 'error' AND observed_at >= ?
+                f"""
+                SELECT AVG(s.value) AS avg_value, COUNT(*) AS n
+                FROM skill_signals s
+                WHERE s.signal_kind = 'error' AND s.observed_at >= ?
+                  AND {skill_signal_eligible_sql('s')}
                 """,
                 (cutoff,),
             )

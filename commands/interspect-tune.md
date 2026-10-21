@@ -27,9 +27,17 @@ if [[ -z "$INTERSPECT_LIB" || ! -f "$INTERSPECT_LIB" ]]; then
     exit 1
 fi
 source "$INTERSPECT_LIB"
-_interspect_ensure_db
+# Initialization (including the gate migration) must succeed before any
+# decision read or canary evaluation: a failed migration leaves prior exposed
+# evidence and aggregates in place.
+if ! _interspect_ensure_db; then
+    echo "Error: Interspect initialization failed (gate migration or database error); stopping before any evidence is read." >&2
+    exit 1
+fi
 DB=$(_interspect_db_path)
 ```
+
+**If this block exits non-zero, stop here.** Do not run any later block or evaluate canaries; report the error above to the user.
 
 ## Parse Target
 
@@ -62,7 +70,8 @@ Check `.clavain/interspect/overlays/$TARGET/tuning.md`; if it exists, ask "Regen
 ### Tool mode (KIND=tool)
 
 ```bash
-PATTERN_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source = '$TARGET' AND source_kind = 'tool' AND $(_interspect_eligible_sql);" 2>/dev/null || echo "0")
+_interspect_validate_tool_source "$TARGET" || exit 1
+PATTERN_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source = '$(_interspect_sql_escape "$TARGET")' AND source_kind = 'tool' AND $(_interspect_eligible_sql);" 2>/dev/null || echo "0")
 ```
 If 0: "No tool-pattern evidence found for $TARGET."
 

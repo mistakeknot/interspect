@@ -23,9 +23,17 @@ if [[ -z "$INTERSPECT_LIB" || ! -f "$INTERSPECT_LIB" ]]; then
     exit 1
 fi
 source "$INTERSPECT_LIB"
-_interspect_ensure_db
+# Initialization (including the gate migration) must succeed before any
+# decision read or canary evaluation: a failed migration leaves prior exposed
+# evidence and aggregates in place.
+if ! _interspect_ensure_db; then
+    echo "Error: Interspect initialization failed (gate migration or database error); stopping before any evidence is read." >&2
+    exit 1
+fi
 DB=$(_interspect_db_path)
 ```
+
+**If this block exits non-zero, stop here.** Do not run any later block or evaluate canaries; report the error above to the user.
 
 ## Overview (no arguments)
 
@@ -54,6 +62,8 @@ TOP_AGENTS=$(sqlite3 -separator ' | ' "$DB" "SELECT source, COUNT(*) as cnt, COU
 # Active canaries
 ACTIVE_CANARIES=$(sqlite3 "$DB" "SELECT COUNT(*) FROM canary WHERE status = 'active';")
 ALERT_CANARIES=$(sqlite3 "$DB" "SELECT COUNT(*) FROM canary WHERE status = 'alert';")
+# Canaries retired by a gate migration (backing evidence re-quarantined): not monitoring
+REVIEW_CANARIES=$(sqlite3 "$DB" "SELECT COUNT(*) FROM canary WHERE status = 'needs_review';")
 
 # Get canary summary using shared function
 CANARY_SUMMARY=$(_interspect_get_canary_summary 2>/dev/null || echo "[]")
@@ -89,7 +99,7 @@ Present as:
 |-------|--------|----------|
 {top_agents rows}
 
-### Canaries: {canary_count} total ({active_canaries} active, {alert_canaries} alerting)
+### Canaries: {canary_count} total ({active_canaries} active, {alert_canaries} alerting, {review_canaries} need review)
 
 {for each canary in CANARY_SUMMARY (parse with jq):
   **{agent}** [{status}]
@@ -97,7 +107,8 @@ Present as:
   - Window: {uses_so_far}/{window_uses} uses
   - Expires: {window_expires_at}
   - Baseline: OR={baseline_override_rate}, FP={baseline_fp_rate}, FD={baseline_finding_density}
-    {if baseline values are null: "(insufficient historical data — collecting)"}
+    {if status == "needs_review": "(invalidated by gate migration — NOT collecting; baseline and samples were cleared)"}
+    {else if baseline values are null: "(insufficient historical data — collecting)"}
   - Current:  OR={avg_override_rate}, FP={avg_fp_rate}, FD={avg_finding_density}
     {if sample_count == 0: "(no samples yet)"}
   - Samples: {sample_count}
@@ -110,8 +121,12 @@ Present as:
       status == "alert": "Review quality may have degraded. Consider /interspect:interspect-revert {agent}."
       status == "expired_unused": "Window expired without usage. Override remains."
       status == "reverted": "Override was reverted. Canary closed."
+      status == "needs_review": "Backing evidence was re-quarantined by a gate migration; the old aggregate is retained in interspect_gate_override_review. Reconcile the override, then revert it (closes this canary) or re-apply it to start a fresh canary."
     }
 }
+
+{if review_canaries > 0:
+  "**Review required:** {review_canaries} canary(ies) were invalidated by a gate migration and are not monitoring their overrides."}
 
 {if alert_canaries > 0:
   "**Action required:** {alert_canaries} canary alert(s) detected. Review overrides above and consider reverting."}
@@ -195,7 +210,7 @@ if [[ -d "$OVERLAY_DIR" ]]; then
             TOTAL_ACTIVE=$((TOTAL_ACTIVE + active_count))
             # Query canary status for this agent's overlays
             escaped_agent=$(_interspect_sql_escape "$agent")
-            canary_status=$(sqlite3 "$DB" "SELECT status FROM canary WHERE group_id LIKE '${escaped_agent}/%' AND status = 'active' LIMIT 1;" 2>/dev/null || echo "none")
+            canary_status=$(sqlite3 "$DB" "SELECT status FROM canary WHERE group_id LIKE '${escaped_agent}/%' AND status IN ('active','needs_review') ORDER BY status = 'needs_review' DESC LIMIT 1;" 2>/dev/null || echo "none")
             # Store row: agent, active_count, total_count, token_est, canary_status
         fi
     done
@@ -210,11 +225,12 @@ Present:
 | Agent | Active | Total | Est. Tokens | Canary | Next Action |
 |-------|--------|-------|-------------|--------|-------------|
 {for each agent with overlays:
-  - Canary column: "monitoring", "passed", "alert", or "none"
+  - Canary column: "monitoring", "passed", "alert", "needs_review", or "none"
   - Next Action:
     canary == "active": "Monitoring ({uses}/{window} uses)"
     canary == "alert": "Review — run /interspect:interspect-revert {agent}"
     canary == "passed": "Stable"
+    canary == "needs_review": "Canary invalidated by gate migration — review, then revert or re-apply"
     canary == "none": "No canary (manual overlay?)"
   - Token budget warning if token_est > 400: " ⚠ near budget (500)"
 }

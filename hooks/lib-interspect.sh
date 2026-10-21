@@ -1817,7 +1817,7 @@ _interspect_revert_override_locked() {
     # Update DB records INSIDE flock
     local escaped_agent
     escaped_agent=$(_interspect_sql_escape "$agent")
-    _interspect_sqlite_write "$db" "UPDATE canary SET status = 'reverted' WHERE group_id = '${escaped_agent}' AND status = 'active';"
+    _interspect_sqlite_write "$db" "UPDATE canary SET status = 'reverted' WHERE group_id = '${escaped_agent}' AND status IN ('active', 'needs_review');"
     _interspect_sqlite_write "$db" "UPDATE modifications SET status = 'reverted' WHERE group_id = '${escaped_agent}' AND status = 'applied';"
 }
 
@@ -2995,7 +2995,10 @@ _interspect_migrate_gate() {
     if [[ -z "$root" ]]; then
         root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
     fi
-    request=$(python3 "$_INTERSPECT_GATE_MODULE" shell-request overrides_path "$root/.claude/routing-overrides.json") || return $?
+    # Reconcile the same policy file the readers and approvals use.
+    local filepath="${FLUX_ROUTING_OVERRIDES_PATH:-.claude/routing-overrides.json}"
+    _interspect_validate_overrides_path "$filepath" || return 1
+    request=$(python3 "$_INTERSPECT_GATE_MODULE" shell-request overrides_path "$root/$filepath") || return $?
     printf '%s' "$request" | python3 "$_INTERSPECT_GATE_MODULE" migrate "$_INTERSPECT_DB"
 }
 
@@ -4519,7 +4522,7 @@ _interspect_disable_overlay_locked() {
     local group_id="${escaped_agent}/${escaped_overlay_id}"
 
     _interspect_sqlite_write "$db" "UPDATE modifications SET status = 'reverted' WHERE group_id = '${group_id}' AND status = 'applied';"
-    _interspect_sqlite_write "$db" "UPDATE canary SET status = 'reverted' WHERE group_id = '${group_id}' AND status = 'active';"
+    _interspect_sqlite_write "$db" "UPDATE canary SET status = 'reverted' WHERE group_id = '${group_id}' AND status IN ('active', 'needs_review');"
 }
 
 # ─── Effectiveness metrics ──────────────────────────────────────────────────

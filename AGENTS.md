@@ -261,6 +261,25 @@ even after an implicit migration without a routing-overrides path. The retained
 `interspect_gate_exposed` IDs also cover later lifts when the original immutable
 audit snapshot captured a held row.
 
+Canary matching resolves the backing agent separately from the modification
+identity: an overlay canary's compound `agent/overlay` group_id invalidates by the
+part before `/` (its baseline is computed from that agent's evidence), and a row
+matches by any source recorded for it, including the `gate_source`/`source` kept in
+its first audit, because a revision-3 repair clears canonical identities of
+ambiguous review IDs. Revision 3 kept no exposure table, so a row its audit shows
+as held (never corroborated) is treated as possibly exposed: a later lift followed
+by another repair would otherwise leave audit and row both merely held. This
+over-invalidates conservatively; operators review the listed canaries. Reverting
+an override or overlay also closes its `needs_review` canaries, and
+`/interspect:interspect-status` reports them as invalidated (not "collecting").
+`calibrate-audit.py` `defect_escape_rate` uses `skill_signal_eligible_sql`, so
+signals tied to ineligible, quarantined or missing invocations never count.
+`interspect-status`, `-propose`, `-approve` and `-tune` stop with an error when
+`_interspect_ensure_db` (including the gate migration) fails, before any decision
+read or canary evaluation. Migration reconciles the validated
+`FLUX_ROUTING_OVERRIDES_PATH` (default `.claude/routing-overrides.json`) and fails
+on an unsafe path. Tool-mode tuning validates `$TARGET` and SQL-escapes it.
+
 Finished-session agent sampling deliberately ignores ordinary time quarantine
 (48 hours by default), while excluding held low-confidence findings. Other
 decision readers retain the full eligibility predicate. Autonomy and agent
