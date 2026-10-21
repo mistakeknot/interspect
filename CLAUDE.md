@@ -69,8 +69,23 @@ generators could join `(a@b, c)` and `(a, b@c)` into the same ID. Stored rows do
 not retain enough provenance to distinguish explicit IDs from generated IDs, so
 repair conservatively clears their gate identities and usable keys while keeping
 diagnostics and audits. They cannot corroborate a new correction. Repeated repair
-also holds this shape; ordinary initialization at revision 3 is a read-only fast
-path. New generation still rejects `@` in basenames.
+also holds this shape. New generation still rejects `@` in basenames.
+
+Revision 4 retires agent canaries whose sample sessions or baseline/monitoring
+windows overlap exposed evidence re-quarantined by migration. Matching uses
+canonical session aliases and agent cohorts; missing historical window metadata
+is handled conservatively. It sets `needs_review`, deletes affected canary
+samples, resets usage and clears numeric baselines. Migration lists affected
+canary IDs and preserves their previous records/samples and evidence IDs as
+`kind: "canary"` entries in `interspect_gate_override_review`. Evaluation returns
+`needs_review` without a pass/alert; status ignores even samples retained under
+that invalid state. Reconcile the override and establish a fresh canary after
+review; never reactivate the old aggregate. Overrides are not automatically
+reverted. Path-aware initialization reconciles override reports from retained
+audits even if an earlier bridge migrated without the override path. Ordinary
+initialization at the current revision remains read-only when no report is due.
+`interspect_gate_exposed` retains exposed IDs across later lifts and repairs,
+including when the original immutable audit snapshot captured a held row.
 
 Disagreements use `event_confidence()` to honor top-level or nested true flags
 regardless of dismissal reason, and reject malformed contexts/non-boolean flags.
@@ -101,6 +116,16 @@ migration re-quarantines evidence; both counts and aggregates exclude them.
 Held rows remain visible in raw diagnostics and gate-control scans, never as
 eligible evidence for learned decisions. Prior derived weights/overlays still
 require operator reconciliation; filtering does not reconstruct their history.
+
+Finished-session agent canary sampling is the time-quarantine exception: it
+records normal telemetry immediately under the default 48-hour quarantine, but
+never counts a low-confidence finding unless it is validly corroborated. This
+prevents ordinary sessions from silently producing no samples. Autonomy and
+agent scores use `gate_session` (lowercase raw session fallback) and `gate_source`
+for history thresholds; canary sampling aggregates and deduplicates canonical
+session aliases. Consensus audit agreement, output diversity and evidence counts
+use the full evidence eligibility predicate. Agent tune targets are regex-checked
+and SQL-escaped before querying evidence.
 
 Before rollout, pause writers and rehearse on a consistent database copy outside
 git. Disable corroboration for rollback; with writers still paused, drop only

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 SENTINEL = 4102444800
 REASONS = ('agent_wrong', 'deprioritized', 'already_fixed', 'stale_finding',
            'not_applicable', 'severity_miscalibrated')
-GUARD_REVISION = 3
+GUARD_REVISION = 4
 
 
 class GateDependencyError(RuntimeError):
@@ -250,14 +250,120 @@ def migrated(db):
     return revision == GUARD_REVISION
 
 
+def reconcile_override_reviews(db, overrides_path):
+    """Repeatable even when a bridge already migrated without a policy path.
+
+    Leave the ordinary initialization fast path read-only when nothing is new.
+    The caller owns the transaction; never alter the overrides file.
+    """
+    if overrides_path is None or not Path(overrides_path).exists():
+        return
+    affected_ids = {r[0] for r in db.execute(
+        "SELECT evidence_id FROM interspect_gate_audit WHERE "
+        "COALESCE(json_extract(previous_row,'$.quarantine_until'),0)<=? "
+        "OR json_extract(previous_row,'$.corroborated_at')>0", (int(time.time()),))}
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='interspect_gate_exposed'").fetchone():
+        affected_ids.update(r[0] for r in db.execute('SELECT evidence_id FROM interspect_gate_exposed'))
+    overrides = parse_object(Path(overrides_path).read_text()).get('overrides', [])
+    if not isinstance(overrides, list):
+        raise ValueError('invalid routing overrides')
+    for override in overrides:
+        if not isinstance(override, dict) or not isinstance(override.get('evidence_ids', []), list):
+            raise ValueError('invalid override evidence IDs')
+        # Resolve scalar references using SQLite's INTEGER primary-key affinity.
+        references = {r[0] for r in db.execute(
+            'SELECT id FROM evidence WHERE id IN (SELECT atom FROM json_each(?))',
+            (json.dumps(override.get('evidence_ids', [])),))}
+        if affected_ids.intersection(references):
+            encoded = json.dumps(override, sort_keys=True)
+            if not db.execute('SELECT 1 FROM interspect_gate_override_review WHERE override_json=?',
+                              (encoded,)).fetchone():
+                db.execute('INSERT INTO interspect_gate_override_review SELECT ? '
+                           'WHERE NOT EXISTS (SELECT 1 FROM interspect_gate_override_review WHERE override_json=?)',
+                           (encoded, encoded))
+
+
+def invalidate_canaries(db, affected_rows):
+    """Retire aggregates with possible exposure; never try to subtract a finding.
+
+    Old samples have no evidence-ID lineage. Match canonical session aliases,
+    cohort and baseline/monitoring windows conservatively, retaining the old
+    aggregates in the review table. A clean row in a mixed session is no proof
+    that its sample is clean. Missing window metadata cannot prove isolation.
+    """
+    if not affected_rows or not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='canary'").fetchone():
+        return []
+
+    def dictionaries(cursor):
+        names = [d[0] for d in cursor.description]
+        return [dict(zip(names, row)) for row in cursor.fetchall()]
+
+    def timestamp(value):
+        try:
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+    def overlaps(value, start, end):
+        value, start, end = map(timestamp, (value, start, end))
+        return value is None or start is None or end is None or start <= value <= end
+
+    invalidated = []
+    for canary in dictionaries(db.execute("SELECT * FROM canary WHERE status IN ('active','alert','passed')")):
+        samples = dictionaries(db.execute('SELECT * FROM canary_samples WHERE canary_id=?', (canary['id'],)))
+        sample_sessions = {s['session_id'].lower() for s in samples}
+        affected = set()
+        for row in affected_rows:
+            try:
+                source = normalize_field('source', row.get('gate_source') or row['source'])
+            except ValueError:
+                source = (row['source'] or '').lower()
+            try:
+                cohort = normalize_field('source', canary['group_id']) if canary['group_id'] else None
+            except ValueError:
+                cohort = canary['group_id'].lower()
+            if cohort and source and source != cohort:
+                continue
+            sid = (row.get('gate_session') or row['session_id'] or '').lower()
+            times = [row.get('ts')]
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'").fetchone():
+                times.extend(r[0] for r in db.execute(
+                    'SELECT start_ts FROM sessions WHERE lower(session_id)=?', (sid,)))
+            baseline = (canary.get('baseline_window') or '').split('..')
+            baseline_overlap = canary['baseline_override_rate'] is not None and (
+                len(baseline) != 2 or any(overlaps(t, *baseline) for t in times))
+            monitoring_overlap = any(overlaps(t, canary['applied_at'], canary['window_expires_at']) for t in times)
+            if sid in sample_sessions or baseline_overlap or monitoring_overlap:
+                affected.add(row['id'])
+        if not affected:
+            continue
+        report = dict(kind='canary', canary_id=canary['id'], agent=canary['group_id'],
+                      evidence_ids=sorted(affected), reason='Migration re-quarantined backing evidence',
+                      previous_canary=canary, previous_samples=samples)
+        db.execute('INSERT INTO interspect_gate_override_review VALUES (?)', (json.dumps(report, sort_keys=True),))
+        db.execute('DELETE FROM canary_samples WHERE canary_id=?', (canary['id'],))
+        db.execute("UPDATE canary SET status='needs_review', uses_so_far=0, "
+                   "baseline_override_rate=NULL, baseline_fp_rate=NULL, baseline_finding_density=NULL, "
+                   "baseline_window=NULL, verdict_reason='Migration re-quarantined backing evidence; review required' "
+                   'WHERE id=?', (canary['id'],))
+        invalidated.append(canary['id'])
+    return invalidated
+
+
 def migrate(db, overrides_path=None):
     require_json1(db)
     # Read-only fast path: ordinary hook initialization must not take a write lock.
     if migrated(db):
+        if overrides_path is not None:
+            with db:
+                reconcile_override_reviews(db, overrides_path)
         return
     db.execute('BEGIN IMMEDIATE')
     try:
         if migrated(db):
+            reconcile_override_reviews(db, overrides_path)
             db.commit()
             return
         columns = {r[1]: r for r in db.execute('PRAGMA table_info(evidence)')}
@@ -275,6 +381,9 @@ def migrate(db, overrides_path=None):
             if name not in columns:
                 db.execute(f'ALTER TABLE evidence ADD COLUMN {name} {declaration}')
         db.execute('CREATE TABLE IF NOT EXISTS interspect_gate_audit (evidence_id INTEGER PRIMARY KEY, previous_row TEXT NOT NULL)')
+        # Original audits are immutable; a later lift/re-hold needs its own
+        # durable exposure record for path-aware reconciliation after repair.
+        db.execute('CREATE TABLE IF NOT EXISTS interspect_gate_exposed (evidence_id INTEGER PRIMARY KEY)')
         db.execute('CREATE TABLE IF NOT EXISTS interspect_gate_override_review (override_json TEXT NOT NULL)')
         # Refresh pre-fix v2 guards transactionally. Rollback restores old guards.
         for action in ('insert', 'update'):
@@ -296,7 +405,10 @@ def migrate(db, overrides_path=None):
             "SELECT evidence_id FROM interspect_gate_audit WHERE "
             "COALESCE(json_extract(previous_row,'$.quarantine_until'),0)<=? "
             "OR json_extract(previous_row,'$.corroborated_at')>0", (now,)))
+        exposed_ids.update(r[0] for r in db.execute('SELECT evidence_id FROM interspect_gate_exposed'))
         affected_ids = exposed_ids.intersection(row['id'] for row in rows)
+        db.executemany('INSERT OR IGNORE INTO interspect_gate_exposed VALUES (?)',
+                       ((evidence_id,) for evidence_id in affected_ids))
         for row in rows:
             db.execute('INSERT OR IGNORE INTO interspect_gate_audit VALUES (?,?)',
                        (row['id'], json.dumps(row, ensure_ascii=True)))
@@ -338,25 +450,8 @@ def migrate(db, overrides_path=None):
                           corroborated_by=None, corroborated_via=None)
             assignments = ','.join(name + '=?' for name in fields)
             db.execute(f'UPDATE evidence SET {assignments} WHERE id=?', (*fields.values(), row['id']))
-        if overrides_path is not None and Path(overrides_path).exists():
-            overrides = parse_object(Path(overrides_path).read_text()).get('overrides', [])
-            if not isinstance(overrides, list):
-                raise ValueError('invalid routing overrides')
-            for override in overrides:
-                if not isinstance(override, dict) or not isinstance(override.get('evidence_ids', []), list):
-                    raise ValueError('invalid override evidence IDs')
-                # Writers accept JSON arrays without constraining member types.
-                # Resolve scalar references using the actual INTEGER PK affinity:
-                # 1, "1", 1.0, "01", "1e0", etc. refer to the same evidence.
-                # json_each.atom is NULL for arrays/objects (not references).
-                references = {r[0] for r in db.execute(
-                    'SELECT id FROM evidence WHERE id IN (SELECT atom FROM json_each(?))',
-                    (json.dumps(override.get('evidence_ids', [])),))}
-                if affected_ids.intersection(references):
-                    encoded = json.dumps(override, sort_keys=True)
-                    db.execute('INSERT INTO interspect_gate_override_review SELECT ? '
-                               'WHERE NOT EXISTS (SELECT 1 FROM interspect_gate_override_review WHERE override_json=?)',
-                               (encoded, encoded))
+        invalidated = invalidate_canaries(db, [row for row in rows if row['id'] in affected_ids])
+        reconcile_override_reviews(db, overrides_path)
         db.execute('CREATE INDEX IF NOT EXISTS idx_evidence_gate ON evidence '
                    '(gate_version,gate_source,gate_reason,gate_key,gate_session)')
         install_guards(db)
@@ -373,6 +468,9 @@ def migrate(db, overrides_path=None):
         if affected_ids:
             print('interspect gate: previously eligible evidence now held: '
                   + json.dumps(sorted(affected_ids)), file=sys.stderr)
+        if invalidated:
+            print('interspect gate: canaries require review: ' + json.dumps(invalidated)
+                  + '; see interspect_gate_override_review', file=sys.stderr)
     except BaseException:
         db.rollback()
         raise
@@ -669,10 +767,16 @@ def main():
         with sqlite3.connect(database_uri, uri=True, timeout=5) as db:
             if operation == 'migrate':
                 migrate(db, request.get('overrides_path'))
-                count = db.execute('SELECT COUNT(*) FROM interspect_gate_override_review').fetchone()[0]
+                count = db.execute("SELECT COUNT(*) FROM interspect_gate_override_review "
+                                   "WHERE json_extract(override_json,'$.kind') IS NOT 'canary'").fetchone()[0]
                 if count:
                     print(f'interspect gate: REVIEW REQUIRED: {count} routing overrides; '
                           'see interspect_gate_override_review (report only, not reverted)', file=sys.stderr)
+                canary_count = db.execute("SELECT COUNT(*) FROM interspect_gate_override_review "
+                                          "WHERE json_extract(override_json,'$.kind')='canary'").fetchone()[0]
+                if canary_count:
+                    print(f'interspect gate: REVIEW REQUIRED: {canary_count} canary records; '
+                          'see interspect_gate_override_review', file=sys.stderr)
             elif operation == 'insert':
                 if len(sys.argv) > 3:
                     request.update(diagnostic_context=sys.argv[3], project=sys.argv[4],

@@ -692,6 +692,12 @@ _interspect_eligible_sql() {
     printf "(COALESCE(%squarantine_until,0) <= CAST(strftime('%%s','now') AS INTEGER) AND (%slow_confidence=0 OR (%slow_confidence=1 AND %sgate_version=2 AND %scorroborated_at>0 AND %squarantine_until=0)))" "$p" "$p" "$p" "$p" "$p" "$p"
 }
 
+# Finished-session sampling runs before ordinary time quarantine expires.
+# It may count normal telemetry, but never a held low-confidence finding.
+_interspect_sample_eligible_sql() {
+    printf '(low_confidence=0 OR (low_confidence=1 AND gate_version=2 AND corroborated_at>0 AND quarantine_until=0))'
+}
+
 # A derived signal needs the same eligible invocation, skill AND session.
 # Keep byte-identical to Python skill_signal_eligible_sql; alias is internal.
 _interspect_skill_signal_eligible_sql() {
@@ -2056,7 +2062,7 @@ _interspect_should_auto_apply() {
     escaped_agent=$(_interspect_sql_escape "$agent")
 
     local session_count
-    session_count=$(sqlite3 "$db" "SELECT COUNT(DISTINCT session_id) FROM evidence WHERE source = '${escaped_agent}' AND source_kind = 'agent' AND $(_interspect_eligible_sql);" 2>/dev/null || echo "0")
+    session_count=$(sqlite3 "$db" "SELECT COUNT(DISTINCT COALESCE(gate_session, lower(session_id))) FROM evidence WHERE COALESCE(gate_source, source) = '${escaped_agent}' AND source_kind = 'agent' AND $(_interspect_eligible_sql);" 2>/dev/null || echo "0")
 
     if (( session_count < min_baseline )); then
         echo "INFO: Insufficient baseline for ${agent} (${session_count}/${min_baseline} sessions) — forcing propose mode." >&2
@@ -2296,11 +2302,11 @@ _interspect_record_canary_sample() {
     local session_id="$1"
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     local escaped_sid
-    escaped_sid=$(_interspect_sql_escape "$session_id")
+    escaped_sid=$(_interspect_sql_escape "$(printf '%s' "$session_id" | LC_ALL=C tr '[:upper:]' '[:lower:]')")
 
     # Skip sessions with no evidence events (not a flux-drive "use")
     local event_count
-    event_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}' AND $(_interspect_eligible_sql);")
+    event_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE COALESCE(gate_session, lower(session_id)) = '${escaped_sid}' AND $(_interspect_sample_eligible_sql);")
     if (( event_count == 0 )); then
         return 0
     fi
@@ -2334,8 +2340,8 @@ _interspect_record_canary_sample() {
             COUNT(*),
             SUM(CASE WHEN event IN ('override','disagreement_override') THEN 1 ELSE 0 END),
             SUM(CASE WHEN event IN ('override','disagreement_override') AND override_reason IN ('agent_wrong','severity_miscalibrated') THEN 1 ELSE 0 END)
-            FROM evidence WHERE session_id = '${escaped_sid}' ${source_filter}
-            AND $(_interspect_eligible_sql);")
+            FROM evidence WHERE COALESCE(gate_session, lower(session_id)) = '${escaped_sid}' ${source_filter}
+            AND $(_interspect_sample_eligible_sql);")
 
         local total_events override_count agent_wrong_count
         IFS='|' read -r total_events override_count agent_wrong_count <<< "$metrics_row"
@@ -2361,7 +2367,8 @@ _interspect_record_canary_sample() {
         # changes() must be checked in same sqlite3 invocation as the INSERT
         _interspect_sqlite_write "$db" "
             INSERT OR IGNORE INTO canary_samples (canary_id, session_id, ts, override_rate, fp_rate, finding_density)
-                VALUES (${canary_id}, '${escaped_sid}', '${ts}', ${override_rate}, ${fp_rate}, ${finding_density});
+                SELECT ${canary_id}, '${escaped_sid}', '${ts}', ${override_rate}, ${fp_rate}, ${finding_density}
+                WHERE NOT EXISTS (SELECT 1 FROM canary_samples WHERE canary_id=${canary_id} AND lower(session_id)='${escaped_sid}');
             UPDATE canary SET uses_so_far = uses_so_far + 1 WHERE id = ${canary_id} AND changes() > 0;
         "
     done <<< "$canary_rows"
@@ -2437,6 +2444,14 @@ _interspect_evaluate_canary() {
     local agent b_or b_fp b_fd uses_so_far window_uses current_status cohort_key
     IFS='|' read -r agent b_or b_fp b_fd uses_so_far window_uses current_status cohort_key <<< "$canary_row"
     [[ -z "$cohort_key" ]] && cohort_key="${agent}:*"
+
+    # Migration invalidates the complete aggregate (including its baseline).
+    # Do not produce a pass/alert from samples retained by older writers.
+    if [[ "$current_status" == "needs_review" ]]; then
+        jq -n --argjson id "$canary_id" --arg agent "$agent" \
+            '{canary_id:$id,agent:$agent,status:"needs_review",reason:"Backing evidence re-quarantined by migration",sample_count:0}'
+        return 0
+    fi
 
     # Already resolved
     if [[ "$current_status" != "active" ]]; then
@@ -2801,10 +2816,10 @@ _interspect_get_canary_summary() {
         SELECT c.id, c.group_id as agent, c.status, c.uses_so_far, c.window_uses,
                c.baseline_override_rate, c.baseline_fp_rate, c.baseline_finding_density,
                c.applied_at, c.window_expires_at, c.verdict_reason,
-               (SELECT COUNT(*) FROM canary_samples cs WHERE cs.canary_id = c.id) as sample_count,
-               (SELECT printf('%.4f', AVG(cs.override_rate)) FROM canary_samples cs WHERE cs.canary_id = c.id) as avg_override_rate,
-               (SELECT printf('%.4f', AVG(cs.fp_rate)) FROM canary_samples cs WHERE cs.canary_id = c.id) as avg_fp_rate,
-               (SELECT printf('%.4f', AVG(cs.finding_density)) FROM canary_samples cs WHERE cs.canary_id = c.id) as avg_finding_density
+               (SELECT COUNT(*) FROM canary_samples cs WHERE cs.canary_id = c.id AND c.status != 'needs_review') as sample_count,
+               (SELECT printf('%.4f', AVG(cs.override_rate)) FROM canary_samples cs WHERE cs.canary_id = c.id AND c.status != 'needs_review') as avg_override_rate,
+               (SELECT printf('%.4f', AVG(cs.fp_rate)) FROM canary_samples cs WHERE cs.canary_id = c.id AND c.status != 'needs_review') as avg_fp_rate,
+               (SELECT printf('%.4f', AVG(cs.finding_density)) FROM canary_samples cs WHERE cs.canary_id = c.id AND c.status != 'needs_review') as avg_finding_density
         FROM canary c ORDER BY c.applied_at DESC;
     " 2>/dev/null) || true
     # sqlite3 -json returns empty string for zero rows
@@ -3714,22 +3729,28 @@ def score_subset(agent, rows, non_bootstrap_count):
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 non_bootstrap_count = conn.execute(
-    "SELECT COUNT(*) FROM sessions WHERE COALESCE(source, 'normal') != 'bootstrap'"
+    "SELECT COUNT(DISTINCT lower(session_id)) FROM sessions WHERE COALESCE(source, 'normal') != 'bootstrap'"
 ).fetchone()[0]
 rows = conn.execute(
     f"""
     SELECT
-        CASE
+        COALESCE(e.gate_source, lower(CASE
             WHEN e.source LIKE 'interflux:review:%' THEN SUBSTR(e.source, INSTR(e.source, ':') + INSTR(SUBSTR(e.source, INSTR(e.source, ':') + 1), ':') + 1)
             WHEN e.source LIKE 'interflux:%' THEN SUBSTR(e.source, 11)
             ELSE e.source
-        END AS agent,
+        END)) AS agent,
         e.event,
         e.context AS context,
-        e.session_id,
+        COALESCE(e.gate_session, lower(e.session_id)) AS session_id,
         COALESCE(s.source, 'bootstrap') AS session_source
     FROM evidence e
-    LEFT JOIN sessions s ON e.session_id = s.session_id
+    LEFT JOIN (
+        SELECT lower(session_id) AS session_id,
+               CASE MIN(CASE COALESCE(source, 'normal') WHEN 'bootstrap' THEN 0
+                        WHEN 'self-building' THEN 1 ELSE 2 END)
+                    WHEN 0 THEN 'bootstrap' WHEN 1 THEN 'self-building' ELSE 'normal' END AS source
+        FROM sessions GROUP BY lower(session_id)
+    ) s ON COALESCE(e.gate_session, lower(e.session_id)) = s.session_id
     WHERE e.event IN ('agent_dispatch', 'verdict_outcome', 'override', 'disagreement_override')
       AND e.source_kind = 'agent' AND {sys.argv[10]}
     ORDER BY agent, e.ts

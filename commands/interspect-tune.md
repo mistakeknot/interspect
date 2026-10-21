@@ -52,7 +52,9 @@ Determine `KIND`:
 ### Agent mode (KIND=agent)
 
 ```bash
-CORRECTION_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE (source = '$TARGET' OR source LIKE '%$TARGET') AND source_kind = 'agent' AND event = 'override' AND $(_interspect_eligible_sql);" 2>/dev/null || echo "0")
+[[ "$TARGET" =~ ^fd-[a-z][a-z0-9-]*$ ]] || { echo "Invalid agent name"; exit 1; }
+ESCAPED_TARGET=$(_interspect_sql_escape "$TARGET")
+CORRECTION_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE (COALESCE(gate_source, source) = '$ESCAPED_TARGET' OR source LIKE '%$ESCAPED_TARGET') AND source_kind = 'agent' AND event = 'override' AND $(_interspect_eligible_sql);" 2>/dev/null || echo "0")
 ```
 If 0: "No corrections found for agent $TARGET. Run `/interspect:interspect-correction $TARGET` first."
 Check `.clavain/interspect/overlays/$TARGET/tuning.md`; if it exists, ask "Regenerate?".

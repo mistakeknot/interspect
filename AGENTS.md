@@ -248,6 +248,28 @@ that relationship so later quarantine or migration excludes retained samples
 from counts and averages. Samples without a matching signal are ineligible.
 Raw diagnostic counts and gate-control scans intentionally retain held rows.
 
+Guard revision 4 invalidates agent canaries whose sample sessions or baseline/
+monitoring windows overlap previously exposed evidence re-held by migration.
+Affected canaries become `needs_review`; their samples are deleted, usage reset,
+and numeric baselines cleared. The migration summary lists their IDs and
+`interspect_gate_override_review` retains the previous canary and samples with
+affected evidence IDs. Evaluation cannot pass/alert these canaries, and status
+ignores any retained samples under them. Missing historical window metadata is
+handled conservatively; operators must reconcile and establish a new canary.
+Overrides remain unchanged. Path-aware override reconciliation is repeatable
+even after an implicit migration without a routing-overrides path. The retained
+`interspect_gate_exposed` IDs also cover later lifts when the original immutable
+audit snapshot captured a held row.
+
+Finished-session agent sampling deliberately ignores ordinary time quarantine
+(48 hours by default), while excluding held low-confidence findings. Other
+decision readers retain the full eligibility predicate. Autonomy and agent
+scoring count canonical `gate_session` identities (lowercase raw session fallback)
+and use `gate_source` when present; sampling uses canonical session IDs for
+aggregation and use deduplication. The audit trend's agreement, diversity and
+evidence count exclude ineligible evidence. Agent tune targets must match the
+agent-name regex and are SQL-escaped before querying.
+
 ```bash
 cd tests && uv run pytest -q
 ```
