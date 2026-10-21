@@ -201,6 +201,19 @@ an `overlays` directory in the working directory.
 
 ## Testing
 
+The low-confidence gate requires Python 3.12+ and SQLite JSON1. Run
+`bash tests/shell/test_low_confidence_gate.sh` and the structural `test_gate_*.py`
+tests as well as the suite below. Standalone clones need the existing shared
+structural fixtures on `PYTHONPATH`.
+
+Gate identities are caller assertions, not authenticated sessions. Direct DB
+writers are trusted. Canonical `gate_*` columns and structured keys are separate
+from diagnostics; review/finding IDs must already be lowercase. Missing review
+identity uses explicit session scope, never a special `unscoped:` prefix.
+Migration audits and re-quarantines legacy lifts, holds invalid rows, and lists
+affected routing overrides for operator review. A migration error stops gate
+writes. See `CLAUDE.md` for rollout, rollback and trust-boundary acceptance.
+
 ```bash
 cd tests && uv run pytest -q
 ```

@@ -33,6 +33,7 @@
 # Guard against re-parsing (same pattern as lib-signals.sh)
 [[ -n "${_LIB_INTERSPECT_LOADED:-}" ]] && return 0
 _LIB_INTERSPECT_LOADED=1
+_INTERSPECT_GATE_MODULE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/interspect_gate.py"
 
 # Low-confidence gate sentinel (Sylveste-06i.4 Option A): quarantine_until
 # value used for evidence flagged context.low_confidence=true, so it never
@@ -133,6 +134,8 @@ _interspect_ensure_db() {
 
     # Fast path — DB already exists, but run migrations for new tables
     if [[ -s "$_INTERSPECT_DB" ]]; then
+        # Reject unsupported schemas before any unrelated setup mutates them.
+        _interspect_migrate_gate || return 1
         sqlite3 "$_INTERSPECT_DB" <<'MIGRATE'
 CREATE TABLE IF NOT EXISTS blacklist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -162,24 +165,6 @@ MIGRATE
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN source_table TEXT;" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN raw_override_reason TEXT;" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_source_event_id ON evidence(source_event_id);" 2>/dev/null || true
-        # Add quarantine column to evidence (rsj.1.4: evidence quarantine)
-        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN quarantine_until INTEGER DEFAULT 0;" 2>/dev/null || true
-        # Add low-confidence gate columns to evidence (Sylveste-06i.4 Option A)
-        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN low_confidence INTEGER DEFAULT 0;" 2>/dev/null || true
-        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN corroborated_at INTEGER DEFAULT 0;" 2>/dev/null || true
-        # Real finding_key column (round-2 M1/M3 fix): a first-class, indexed
-        # corroboration key instead of json_extract(context, '$.finding_id').
-        # Populated pre-sanitize from context.review_id + ':' + context.finding_id
-        # (namespaced — see _interspect_insert_evidence), so it never depends on
-        # the post-sanitize context blob (which can be truncated/emptied).
-        sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN finding_key TEXT;" 2>/dev/null || true
-        sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_finding_key ON evidence(source, finding_key);" 2>/dev/null || true
-        # Backfill finding_key for gated rows written before the column existed,
-        # so they stay corroboratable. Idempotent (only NULL keys), guarded by
-        # json_valid because json_extract on malformed context aborts the
-        # statement. Mirrors _interspect_insert_evidence: review_id:finding_id,
-        # or the session-bound unscoped key when there is no review_id.
-        sqlite3 "$_INTERSPECT_DB" "UPDATE evidence SET finding_key = CASE WHEN COALESCE(json_extract(context, '\$.review_id'), '') != '' THEN json_extract(context, '\$.review_id') || ':' || json_extract(context, '\$.finding_id') ELSE 'unscoped:' || session_id || ':' || json_extract(context, '\$.finding_id') END WHERE low_confidence = 1 AND finding_key IS NULL AND json_valid(context) AND COALESCE(json_extract(context, '\$.finding_id'), '') != '';" 2>/dev/null || true
         # Add source_kind discriminator (sylveste-sfhq.1: telemetry fusion)
         # Allowed values: agent | tool | pattern | skill (skill added sylveste-7aj8.1).
         # CHECK constraint can't be added by ALTER TABLE in SQLite — enforced at insert
@@ -276,27 +261,6 @@ ALTER TABLE evidence ADD COLUMN source_event_id TEXT;
 ALTER TABLE evidence ADD COLUMN source_table TEXT;
 ALTER TABLE evidence ADD COLUMN raw_override_reason TEXT;
 CREATE INDEX IF NOT EXISTS idx_evidence_source_event_id ON evidence(source_event_id);
-
--- Quarantine column (added rsj.1.4): evidence is excluded from routing
--- calculations until quarantine_until epoch passes. Default 0 = no quarantine.
-ALTER TABLE evidence ADD COLUMN quarantine_until INTEGER DEFAULT 0;
-
--- Low-confidence gate columns (Sylveste-06i.4 Option A): a caller flags
--- evidence as low_confidence=1 (via context.low_confidence) when it
--- originates from a severity-boundary or single-judge P0/P1 flux-drive
--- finding. Such rows get quarantine_until set to a far-future sentinel
--- (not the normal 48h decay) so they never drive agent_wrong exclusion on
--- their own. corroborated_at records when a second independent signal
--- (another judge or person) lifted the gate. See
--- _interspect_insert_evidence and _interspect_corroborate_evidence.
-ALTER TABLE evidence ADD COLUMN low_confidence INTEGER DEFAULT 0;
-ALTER TABLE evidence ADD COLUMN corroborated_at INTEGER DEFAULT 0;
-
--- Real finding_key column (round-2 M1/M3 fix): first-class, indexed
--- corroboration key (namespaced review_id:finding_id) instead of
--- json_extract on the (possibly sanitized/truncated) context column.
-ALTER TABLE evidence ADD COLUMN finding_key TEXT;
-CREATE INDEX IF NOT EXISTS idx_evidence_finding_key ON evidence(source, finding_key);
 
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
@@ -424,6 +388,7 @@ CREATE TABLE IF NOT EXISTS sentinels (
     value TEXT NOT NULL
 );
 SQL
+    _interspect_migrate_gate || return 1
     # Migration: add cohort columns to canary table (iv-f7gsz)
     # Uses $_INTERSPECT_DB (the function-scoped DB var); $db is local to *other* functions
     # and unset here. Bug fix: sylveste-3hyi.
@@ -731,12 +696,13 @@ _interspect_get_classified_patterns() {
     sqlite3 -separator '|' "$db" "
         SELECT
             CASE
+                WHEN gate_version = 2 THEN gate_source
                 WHEN source LIKE 'interflux:review:fd-%' THEN SUBSTR(source, 19)
                 WHEN source LIKE 'interflux:fd-%' THEN SUBSTR(source, 11)
                 ELSE source
             END as norm_source,
             event, COALESCE(override_reason,''),
-            COUNT(*) as ec, COUNT(DISTINCT session_id) as sc,
+            COUNT(*) as ec, COUNT(DISTINCT COALESCE(gate_session, session_id)) as sc,
             COUNT(DISTINCT project) as pc
         FROM evidence
         WHERE COALESCE(quarantine_until, 0) <= CAST(strftime('%s', 'now') AS INTEGER)
@@ -831,8 +797,8 @@ _interspect_is_routing_eligible() {
     # Quarantine filter: exclude evidence still within quarantine period (rsj.1.4)
     local total wrong pct
     local _qf="AND COALESCE(quarantine_until, 0) <= CAST(strftime('%s', 'now') AS INTEGER) AND source_kind = 'agent'"
-    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') ${_qf};")
-    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated') ${_qf};")
+    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (COALESCE(gate_source, source) = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') ${_qf};")
+    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (COALESCE(gate_source, source) = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated') ${_qf};")
 
     if (( total == 0 )); then
         echo "not_eligible:no_override_events"
@@ -890,8 +856,8 @@ _interspect_get_routing_eligible() {
         escaped=$(_interspect_sql_escape "$src")
         local total wrong pct
         local _qf="AND COALESCE(quarantine_until, 0) <= CAST(strftime('%s', 'now') AS INTEGER) AND source_kind = 'agent'"
-        total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') ${_qf};")
-        wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (source = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated') ${_qf};")
+        total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (COALESCE(gate_source, source) = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') ${_qf};")
+        wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE (COALESCE(gate_source, source) = '${escaped}' OR source = 'interflux:${escaped}' OR source = 'interflux:review:${escaped}') AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated') ${_qf};")
         pct=$(( total > 0 ? wrong * 100 / total : 0 ))
 
         echo "${src}|${ec}|${sc}|${pc}|${pct}"
@@ -1236,8 +1202,8 @@ _interspect_apply_override_locked() {
     escaped_agent=$(_interspect_sql_escape "$agent")
     _interspect_load_confidence
     local total wrong confidence
-    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${escaped_agent}' AND source_kind = 'agent' AND event IN ('override', 'disagreement_override');")
-    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${escaped_agent}' AND source_kind = 'agent' AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
+    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE COALESCE(gate_source, source) = '${escaped_agent}' AND source_kind = 'agent' AND event IN ('override', 'disagreement_override') AND COALESCE(quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER);")
+    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE COALESCE(gate_source, source) = '${escaped_agent}' AND source_kind = 'agent' AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated') AND COALESCE(quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER);")
     if (( total > 0 )); then
         confidence=$(awk -v w="$wrong" -v t="$total" 'BEGIN {printf "%.2f", w/t}')
     else
@@ -1621,8 +1587,8 @@ _interspect_approve_override_locked() {
     escaped_review_prefixed=$(_interspect_sql_escape "interflux:review:${agent}")
     _interspect_load_confidence
     local total wrong confidence
-    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source IN ('${escaped_agent}', '${escaped_prefixed}', '${escaped_review_prefixed}') AND source_kind = 'agent' AND event IN ('override', 'disagreement_override');")
-    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source IN ('${escaped_agent}', '${escaped_prefixed}', '${escaped_review_prefixed}') AND source_kind = 'agent' AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated');")
+    total=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE COALESCE(gate_source, source) IN ('${escaped_agent}', '${escaped_prefixed}', '${escaped_review_prefixed}') AND source_kind = 'agent' AND event IN ('override', 'disagreement_override') AND COALESCE(quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER);")
+    wrong=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE COALESCE(gate_source, source) IN ('${escaped_agent}', '${escaped_prefixed}', '${escaped_review_prefixed}') AND source_kind = 'agent' AND event IN ('override', 'disagreement_override') AND override_reason IN ('agent_wrong', 'severity_miscalibrated') AND COALESCE(quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER);")
     if (( total > 0 )); then
         confidence=$(awk -v w="$wrong" -v t="$total" 'BEGIN {printf "%.2f", w/t}')
     else
@@ -2204,7 +2170,7 @@ _interspect_compute_canary_baseline() {
     local escaped_agent=""
     if [[ -n "$agent" ]]; then
         escaped_agent=$(_interspect_sql_escape "$agent")
-        agent_filter="AND source = '${escaped_agent}'"
+        agent_filter="AND COALESCE(gate_source, source) = '${escaped_agent}'"
     fi
 
     # When agent-scoped: count sessions that have evidence from this agent
@@ -2214,7 +2180,8 @@ _interspect_compute_canary_baseline() {
         session_count=$(sqlite3 "$db" "SELECT COUNT(DISTINCT s.session_id) FROM sessions s
             INNER JOIN evidence e ON e.session_id = s.session_id
             WHERE s.start_ts < '${escaped_ts}' ${project_filter}
-            AND e.source = '${escaped_agent}';")
+            AND COALESCE(e.gate_source, e.source) = '${escaped_agent}'
+            AND COALESCE(e.quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER);")
     else
         session_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM sessions WHERE start_ts < '${escaped_ts}' ${project_filter};")
     fi
@@ -2231,7 +2198,8 @@ _interspect_compute_canary_baseline() {
         session_ids_sql="SELECT DISTINCT s.session_id FROM sessions s
             INNER JOIN evidence e ON e.session_id = s.session_id
             WHERE s.start_ts < '${escaped_ts}' ${project_filter}
-            AND e.source = '${escaped_agent}'
+            AND COALESCE(e.gate_source, e.source) = '${escaped_agent}'
+            AND COALESCE(e.quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER)
             ORDER BY s.start_ts DESC LIMIT ${window_size}"
     else
         session_ids_sql="SELECT session_id FROM sessions WHERE start_ts < '${escaped_ts}' ${project_filter} ORDER BY start_ts DESC LIMIT ${window_size}"
@@ -2244,12 +2212,12 @@ _interspect_compute_canary_baseline() {
         window_start=$(sqlite3 "$db" "SELECT s.start_ts FROM sessions s
             INNER JOIN evidence e ON e.session_id = s.session_id
             WHERE s.start_ts < '${escaped_ts}' ${project_filter}
-            AND e.source = '${escaped_agent}'
+            AND COALESCE(e.gate_source, e.source) = '${escaped_agent}'
             ORDER BY s.start_ts DESC LIMIT 1 OFFSET $((window_size - 1));" 2>/dev/null)
         [[ -z "$window_start" ]] && window_start=$(sqlite3 "$db" "SELECT MIN(s.start_ts) FROM sessions s
             INNER JOIN evidence e ON e.session_id = s.session_id
             WHERE s.start_ts < '${escaped_ts}' ${project_filter}
-            AND e.source = '${escaped_agent}';")
+            AND COALESCE(e.gate_source, e.source) = '${escaped_agent}';")
     else
         window_start=$(sqlite3 "$db" "SELECT start_ts FROM sessions WHERE start_ts < '${escaped_ts}' ${project_filter} ORDER BY start_ts DESC LIMIT 1 OFFSET $((window_size - 1));" 2>/dev/null)
         [[ -z "$window_start" ]] && window_start=$(sqlite3 "$db" "SELECT MIN(start_ts) FROM sessions WHERE start_ts < '${escaped_ts}' ${project_filter};")
@@ -2267,12 +2235,12 @@ _interspect_compute_canary_baseline() {
 
     # Override rate: overrides per session (agent-scoped when filtering)
     local total_overrides override_rate
-    total_overrides=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event IN ('override', 'disagreement_override') ${agent_filter} AND session_id IN (${session_ids_sql});")
+    total_overrides=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event IN ('override', 'disagreement_override') ${agent_filter} AND session_id IN (${session_ids_sql}) AND COALESCE(quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER);")
     override_rate=$(awk "BEGIN {printf \"%.4f\", ${total_overrides} / ${total_sessions_in_window}}")
 
     # FP rate: agent_wrong / total overrides
     local agent_wrong_count fp_rate
-    agent_wrong_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event IN ('override', 'disagreement_override') AND override_reason = 'agent_wrong' ${agent_filter} AND session_id IN (${session_ids_sql});")
+    agent_wrong_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event IN ('override', 'disagreement_override') AND override_reason = 'agent_wrong' ${agent_filter} AND session_id IN (${session_ids_sql}) AND COALESCE(quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER);")
     if (( total_overrides == 0 )); then
         fp_rate="0.0000"
     else
@@ -2281,7 +2249,7 @@ _interspect_compute_canary_baseline() {
 
     # Finding density: evidence events per session (agent-scoped when filtering)
     local total_evidence finding_density
-    total_evidence=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id IN (${session_ids_sql}) ${agent_filter};")
+    total_evidence=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id IN (${session_ids_sql}) ${agent_filter} AND COALESCE(quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER);")
     finding_density=$(awk "BEGIN {printf \"%.4f\", ${total_evidence} / ${total_sessions_in_window}}")
 
     # Output as JSON
@@ -2306,7 +2274,7 @@ _interspect_record_canary_sample() {
 
     # Skip sessions with no evidence events (not a flux-drive "use")
     local event_count
-    event_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}';")
+    event_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE session_id = '${escaped_sid}' AND COALESCE(quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER);")
     if (( event_count == 0 )); then
         return 0
     fi
@@ -2331,7 +2299,7 @@ _interspect_record_canary_sample() {
         if [[ -n "$canary_agent" ]]; then
             local escaped_agent
             escaped_agent=$(_interspect_sql_escape "$canary_agent")
-            source_filter="AND source = '${escaped_agent}'"
+            source_filter="AND COALESCE(gate_source, source) = '${escaped_agent}'"
         fi
 
         # Single query: total events, overrides, and agent_wrong in one sqlite3 call
@@ -2340,7 +2308,8 @@ _interspect_record_canary_sample() {
             COUNT(*),
             SUM(CASE WHEN event IN ('override','disagreement_override') THEN 1 ELSE 0 END),
             SUM(CASE WHEN event IN ('override','disagreement_override') AND override_reason IN ('agent_wrong','severity_miscalibrated') THEN 1 ELSE 0 END)
-            FROM evidence WHERE session_id = '${escaped_sid}' ${source_filter};")
+            FROM evidence WHERE session_id = '${escaped_sid}' ${source_filter}
+            AND COALESCE(quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER);")
 
         local total_events override_count agent_wrong_count
         IFS='|' read -r total_events override_count agent_wrong_count <<< "$metrics_row"
@@ -2674,96 +2643,12 @@ _interspect_consume_kernel_events() {
 # Converts event payload to evidence records for each overridden agent.
 # Args: $1=event_json (full ReviewEvent JSON from ListReviewEvents — all fields preserved)
 _interspect_process_disagreement_event() {
-    local event_json="$1"
-
-    local finding_id resolution chosen_severity impact agents_json dismissal_reason session_id event_id review_run_id
-    finding_id=$(echo "$event_json" | jq -r '.finding_id // empty') || return 0
-    event_id=$(echo "$event_json" | jq -r '.id // empty') || event_id=""
-    resolution=$(echo "$event_json" | jq -r '.resolution // empty') || return 0
-    chosen_severity=$(echo "$event_json" | jq -r '.chosen_severity // empty') || return 0
-    impact=$(echo "$event_json" | jq -r '.impact // empty') || return 0
-    agents_json=$(echo "$event_json" | jq -r '.agents_json // "{}"') || return 0
-    dismissal_reason=$(echo "$event_json" | jq -r '.dismissal_reason // empty') || return 0
-    # An absent/null session_id stays empty (not "unknown"): an empty session is
-    # never a valid corroborating actor in _interspect_insert_evidence.
-    session_id=$(echo "$event_json" | jq -r '.session_id // empty') || return 0
-    # Round-2 M4: optional per-run identity, when the producer supplies one
-    # (e.g. Clavain resolve.md's review_run_id), used to namespace finding_key
-    # exactly like the manual correction path (Sylveste-06i.4 M1). Absent for
-    # today's producer — see the low_confidence block below.
-    review_run_id=$(echo "$event_json" | jq -r '.review_run_id // empty') || review_run_id=""
-
-    [[ -z "$finding_id" || -z "$resolution" || -z "$chosen_severity" ]] && return 0
-
-    # Map dismissal_reason to override_reason for evidence
-    local override_reason=""
-    local is_severity_miscalibrated=0
-    case "$dismissal_reason" in
-        agent_wrong)        override_reason="agent_wrong" ;;
-        deprioritized)      override_reason="deprioritized" ;;
-        already_fixed)      override_reason="stale_finding" ;;
-        not_applicable)     override_reason="not_applicable" ;;
-        "")
-            if [[ "$resolution" == "accepted" && "$impact" == "severity_overridden" ]]; then
-                override_reason="severity_miscalibrated"
-                is_severity_miscalibrated=1
-            fi
-            ;;
-    esac
-
-    # For each agent whose severity differs from chosen, insert evidence
-    local agent_entries
-    agent_entries=$(echo "$agents_json" | jq -c 'to_entries[]' 2>/dev/null) || return 0
-
-    while IFS= read -r entry; do
-        [[ -z "$entry" ]] && continue
-        local agent_name agent_severity
-        agent_name=$(echo "$entry" | jq -r '.key')
-        agent_severity=$(echo "$entry" | jq -r '.value')
-
-        # Only create evidence for agents whose severity was overridden
-        [[ "$agent_severity" == "$chosen_severity" ]] && continue
-
-        # Round-2 M4 (Sylveste-06i.4): the severity_miscalibrated branch sets
-        # chosen_severity to the mechanical max of the panel's own ratings
-        # (synthesis.md Rule 4) — no adjudication beyond the conflicting
-        # panel itself. That is exactly the boundary-noise case Option A
-        # exists to stop auto-driving agent_wrong/severity_miscalibrated
-        # exclusion, so gate it the same way a low-confidence manual
-        # correction is gated: sentinel quarantine until a second,
-        # independent signal corroborates it. (The dismissal-reason branches
-        # above stay ungated for now — a human's explicit
-        # agent_wrong/deprioritized/etc. call on a resolved disagreement;
-        # see synthesis.md Step 4a for the documented rationale.)
-        local context
-        if [[ "$is_severity_miscalibrated" == "1" ]]; then
-            context=$(jq -n \
-                --arg finding_id "$finding_id" \
-                --arg agent_severity "$agent_severity" \
-                --arg chosen_severity "$chosen_severity" \
-                --arg resolution "$resolution" \
-                --arg impact "$impact" \
-                --arg dismissal_reason "$dismissal_reason" \
-                --arg review_id "$review_run_id" \
-                '{finding_id:$finding_id,agent_severity:$agent_severity,chosen_severity:$chosen_severity,resolution:$resolution,impact:$impact,dismissal_reason:$dismissal_reason,low_confidence:true} +
-                 (if $review_id != "" then {review_id:$review_id} else {} end)')
-        else
-            context=$(jq -n \
-                --arg finding_id "$finding_id" \
-                --arg agent_severity "$agent_severity" \
-                --arg chosen_severity "$chosen_severity" \
-                --arg resolution "$resolution" \
-                --arg impact "$impact" \
-                --arg dismissal_reason "$dismissal_reason" \
-                '{finding_id:$finding_id,agent_severity:$agent_severity,chosen_severity:$chosen_severity,resolution:$resolution,impact:$impact,dismissal_reason:$dismissal_reason}')
-        fi
-
-        _interspect_insert_evidence \
-            "$session_id" "$agent_name" "disagreement_override" \
-            "$override_reason" "$context" "interspect-disagreement" \
-            "$event_id" "review_events" "$dismissal_reason" \
-            2>/dev/null || true
-    done <<< "$agent_entries"
+    local requests request
+    requests=$(printf '%s' "$1" | python3 "$_INTERSPECT_GATE_MODULE" disagreement) || return $?
+    while IFS= read -r request; do
+        [[ -n "$request" ]] || continue
+        _interspect_gate_insert "$request" "$request" || return $?
+    done <<< "$requests"
 }
 
 # Process an execution_defect event from the kernel review_events table.
@@ -3119,29 +3004,37 @@ _interspect_validate_hook_id() {
 
 # ─── Evidence insertion ──────────────────────────────────────────────────────
 
-# Round-2 M1 (Sylveste-06i.4): derive a run-scoped review_id from a
-# findings.json path. The output-directory basename ALONE is deliberately
-# stable across reruns of the same target (flux-drive SKILL.md ~128-133), so
-# two independent reruns produced the same review_id and their positional
-# finding IDs (e.g. "P0-1") collided in finding_key, letting an unrelated
-# rerun's flag corroborate a stale one. Append synthesis_timestamp (unique
-# per run, part of the findings.json schema — synthesis.md :292) when
-# present so reruns never share a review_id. When synthesis_timestamp is
-# absent or unreadable there is no way to tell reruns apart, so this prints
-# nothing and returns 1 rather than falling back to the bare basename: callers
-# then omit review_id and the row is corroborated only explicitly (see
-# _interspect_insert_evidence).
+# Derive a review run ID from validated basename and synthesis timestamp.
+# Failure is distinct from a missing timestamp; callers must not silently turn
+# malformed or unreadable finding data into session scope. Identity is asserted.
 # Args: $1=findings_json_path
 _interspect_review_id_from_findings() {
-    local findings_json="$1"
-    local base ts
-    base="$(basename "$(dirname "$findings_json")")"
-    ts=""
-    if [[ -f "$findings_json" ]] && command -v jq >/dev/null 2>&1; then
-        ts=$(jq -r '.synthesis_timestamp // empty' "$findings_json" 2>/dev/null) || ts=""
+    python3 "$_INTERSPECT_GATE_MODULE" review-id "$1"
+}
+
+# These bridges keep JSON strings intact; no jq -r or shell identity rewriting.
+_interspect_migrate_gate() {
+    local request root
+    root="${CLAUDE_PROJECT_DIR:-}"
+    if [[ -z "$root" ]]; then
+        root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
     fi
-    [[ -n "$ts" ]] || return 1
-    echo "${base}@${ts}"
+    request=$(python3 "$_INTERSPECT_GATE_MODULE" shell-request overrides_path "$root/.claude/routing-overrides.json") || return $?
+    printf '%s' "$request" | python3 "$_INTERSPECT_GATE_MODULE" migrate "$_INTERSPECT_DB"
+}
+
+_interspect_gate_insert() {
+    local request="$1" diagnostic="$2" db
+    db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    [[ -f "$db" ]] || return 1
+    diagnostic=$(_interspect_sanitize "$diagnostic")
+    diagnostic=$(_interspect_redact_secrets "$diagnostic")
+    local hours="${INTERSPECT_QUARANTINE_HOURS:-48}" quarantine=0
+    if [[ "$hours" -gt 0 ]] 2>/dev/null; then
+        quarantine=$(( $(date +%s) + hours * 3600 ))
+    fi
+    printf '%s' "$request" | python3 "$_INTERSPECT_GATE_MODULE" insert "$db" "$diagnostic" \
+        "$(_interspect_project_name)" "$(git rev-parse --short HEAD 2>/dev/null || true)" "$quarantine"
 }
 
 # Insert an evidence row with sanitization.
@@ -3196,41 +3089,21 @@ _interspect_insert_evidence() {
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || return 1
 
-    # Low-confidence gate (Sylveste-06i.4 Option A): read BEFORE sanitize, from
-    # the raw context the caller passed. A synthesis-produced finding sets
-    # context.low_confidence=true (severity boundary or single-judge P0/P1
-    # call) and, when it wants corroboration tracked, context.finding_id plus
-    # context.review_id.
-    #
-    # review_id (round-2 M1 fix): flux-drive finding IDs are positional within
-    # a run ("P0-1", "P1-1", …) — every run has a P0-1, so a bare finding_id
-    # collides across unrelated runs. Callers MUST pass a run-scoped
-    # review_id (e.g. the flux-drive output-directory basename) alongside
-    # finding_id; the two combine into finding_key = "review_id:finding_id",
-    # which is what corroboration actually matches on. A caller that omits
-    # review_id still gets gated (fails safe — never auto-excluded) but that
-    # row can only ever be corroborated explicitly via
-    # _interspect_corroborate_evidence, never by a second _interspect_insert_evidence
-    # call, since an un-namespaced key does not match itself here (see below).
-    #
-    # Malformed/absent context fails open (gate not applied) — never blocks
-    # evidence recording.
-    local is_low_confidence=0
-    local finding_id=""
-    local review_id=""
-    if command -v jq >/dev/null 2>&1; then
-        [[ "$(jq -r '.low_confidence // false' <<<"$context_json" 2>/dev/null)" == "true" ]] && is_low_confidence=1
-        finding_id=$(jq -r '.finding_id // empty' <<<"$context_json" 2>/dev/null) || finding_id=""
-        review_id=$(jq -r '.review_id // empty' <<<"$context_json" 2>/dev/null) || review_id=""
-    fi
-    local finding_key=""
-    if [[ -n "$finding_id" && -n "$review_id" ]]; then
-        finding_key="${review_id}:${finding_id}"
-    elif [[ "$is_low_confidence" == 1 && -n "$finding_id" ]]; then
-        # No run identity: key the row to its own session so it can never
-        # match another row, but can still be lifted explicitly with
-        # _interspect_corroborate_evidence <source> "unscoped:<session_id>" <finding_id> <other actor>.
-        finding_key="unscoped:${session_id}:${finding_id}"
+    # Python receives the raw context and decides classification before extraction.
+    # Missing Python is a failure, never a fallback to an ungated correction.
+    if [[ "$source_kind" == agent || "$event" == override || "$event" == disagreement_override ]]; then
+        local request
+        request=$(python3 "$_INTERSPECT_GATE_MODULE" shell-request \
+            session_id,source,event,override_reason,context,source_kind,source_event_id,source_table,raw_override_reason,diagnostic_source,diagnostic_event,diagnostic_reason \
+            "$session_id" "$source" "$event" "$override_reason" "$context_json" "$source_kind" \
+            "$source_event_id" "$source_table" "$raw_override_reason" \
+            "$(_interspect_sanitize "$source")" "$(_interspect_sanitize "$event")" \
+            "$(_interspect_sanitize "$override_reason")") || return $?
+        _interspect_gate_insert "$request" "$context_json" || return $?
+        if [[ "$event" == override ]]; then
+            _interspect_emit_receipt "$session_id" "$event" "${source}|${override_reason}" || true
+        fi
+        return 0
     fi
 
     # Sanitize user-controlled fields
@@ -3272,41 +3145,7 @@ _interspect_insert_evidence() {
     local e_source_table="${source_table//\'/\'\'}"
     local e_raw_override_reason="${raw_override_reason//\'/\'\'}"
     local e_source_kind="${source_kind//\'/\'\'}"
-    local e_finding_key="${finding_key//\'/\'\'}"
-
-    # Low-confidence gate (Sylveste-06i.4 Option A): a flagged row is
-    # quarantined indefinitely (sentinel far past any real quarantine decay)
-    # instead of the normal 48h window, so it never drives agent_wrong
-    # exclusion on its own — UNLESS this is a second, independent (different
-    # session) signal against the same finding_key with a MATCHING
-    # override_reason (round-2 M2 fix: a disagreeing reason, e.g.
-    # "deprioritized", must never lift a gate set by "agent_wrong"), in
-    # which case it IS the corroboration: lift the gate on this row and
-    # every prior gated row for that finding_key right now.
-    #
-    # Matches on the real finding_key column (round-2 M3 fix), not
-    # json_extract(context, ...) — the context column can be truncated or
-    # emptied by _interspect_sanitize, and json_extract on malformed JSON
-    # aborts the whole statement. finding_key is a plain escaped column
-    # value, so one malformed context row can never break corroboration for
-    # any other row.
-    local corroborated_at=0
-    if [[ "$is_low_confidence" == "1" ]]; then
-        quarantine_until=$_INTERSPECT_LOW_CONFIDENCE_SENTINEL
-        # Both sides of an automatic corroboration need a real session id: an
-        # empty one would count as "a different session" from any named one.
-        if [[ -n "$finding_key" && -n "$session_id" ]]; then
-            local already_gated
-            already_gated=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${e_source}' AND low_confidence = 1 AND session_id != '' AND session_id != '${e_session}' AND override_reason = '${e_reason}' AND finding_key = '${e_finding_key}';" 2>/dev/null) || already_gated=0
-            if [[ "${already_gated:-0}" -gt 0 ]]; then
-                corroborated_at=$(date +%s)
-                quarantine_until=0
-                _interspect_sqlite_write "$db" "UPDATE evidence SET quarantine_until = 0, corroborated_at = ${corroborated_at} WHERE source = '${e_source}' AND low_confidence = 1 AND override_reason = '${e_reason}' AND finding_key = '${e_finding_key}';" >/dev/null || true
-            fi
-        fi
-    fi
-
-    _interspect_sqlite_write "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason, quarantine_until, source_kind, low_confidence, corroborated_at, finding_key) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''), ${quarantine_until}, '${e_source_kind}', ${is_low_confidence}, ${corroborated_at}, NULLIF('${e_finding_key}',''));"
+    _interspect_sqlite_write "$db" "INSERT INTO evidence (ts, session_id, seq, source, source_version, event, override_reason, context, project, project_lang, project_type, source_event_id, source_table, raw_override_reason, quarantine_until, source_kind) VALUES ('${ts}', '${e_session}', ${seq}, '${e_source}', '${e_version}', '${e_event}', '${e_reason}', '${e_context}', '${e_project}', NULL, NULL, NULLIF('${e_source_event_id}',''), NULLIF('${e_source_table}',''), NULLIF('${e_raw_override_reason}',''), ${quarantine_until}, '${e_source_kind}');"
 
     # Moat play (sylveste-ewy3.5.4): emit a signed receipt for routing-override
     # applications. Opt-in + fail-open; proposal & canary paths are a separate
@@ -3316,56 +3155,32 @@ _interspect_insert_evidence() {
     fi
 }
 
-# Explicitly corroborate a gated low-confidence finding, lifting the gate
-# without requiring a second _interspect_insert_evidence call (e.g. a
-# re-judge pass or an explicit human confirmation records corroboration this
-# way instead of a second override).
-# Args: $1=source (agent) $2=review_id $3=finding_id $4=corroborated_by
-#   $5=override_reason (REQUIRED — only rows recorded with this same reason
-#   are lifted, matching the automatic path's same-reason rule).
-#   (REQUIRED, non-empty — a session/actor identifier for the corroborating
-#   signal; round-2 N3: rows whose session_id equals corroborated_by are excluded from the
-#   UPDATE, so the session that set the gate can never lift its own gate
-#   through this path either).
-# Matches the real finding_key column (review_id:finding_id), same as
-# _interspect_insert_evidence (round-2 M1/M3).
-# Rows recorded without a run identity use review_id "unscoped:<their session_id>".
-# Output: count of rows corroborated (0 if none were gated for that finding).
-# Returns 1 (no output) on missing source/review_id/finding_id/corroborated_by/reason.
+# Explicit confirmation: source, scope ID, finding ID, actor, reason, scope=review.
+# Session scope requires the original session as scope ID and a distinct actor.
+# Valid requests print a count (including zero); invalid requests print no stdout.
+# Return 1 for validation failures, 2 for database errors. Identities are asserted.
 _interspect_corroborate_evidence() {
-    local source="$1" review_id="$2" finding_id="$3" corroborated_by="${4:-}" reason="${5:-}"
-    [[ -n "$source" && -n "$review_id" && -n "$finding_id" && -n "$reason" ]] || return 1
-    # The corroborating actor is mandatory: with it empty the session
-    # independence check below would not exclude anyone.
-    [[ -n "$corroborated_by" ]] || return 1
-    local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
+    local request db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || return 1
-    local e_source e_finding_key e_corroborated_by e_reason now
-    e_reason=$(_interspect_sql_escape "$reason")
-    e_source=$(_interspect_sql_escape "$source")
-    e_finding_key=$(_interspect_sql_escape "${review_id}:${finding_id}")
-    e_corroborated_by=$(_interspect_sql_escape "$corroborated_by")
-    now=$(date +%s)
-    # Single connection: UPDATE then SELECT changes() in the same session, so
-    # the affected-count is atomic with the update (no separate COUNT-then-
-    # UPDATE race — round-2 N3).
-    local affected
-    affected=$(sqlite3 "$db" "UPDATE evidence SET quarantine_until = 0, corroborated_at = ${now} WHERE source = '${e_source}' AND low_confidence = 1 AND corroborated_at = 0 AND finding_key = '${e_finding_key}' AND override_reason = '${e_reason}' AND session_id != '${e_corroborated_by}'; SELECT changes();" 2>/dev/null) || affected=0
-    echo "${affected:-0}"
+    request=$(python3 "$_INTERSPECT_GATE_MODULE" shell-request \
+        source,scope_id,finding_id,actor,override_reason,scope \
+        "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6-review}") || return $?
+    printf '%s' "$request" | python3 "$_INTERSPECT_GATE_MODULE" corroborate "$db"
 }
 
 # Low-confidence gate stats (Sylveste-06i.4 Option A → Option B decision
 # data): how many findings the gate flagged vs how many were later
 # corroborated. Not gated on quarantine (this is instrumentation, not a
-# routing query). Output: "flagged|corroborated|still_gated".
+# routing query). Output: "flagged|corroborated|still_gated|invalid_held".
 _interspect_low_confidence_gate_stats() {
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || return 1
     sqlite3 -separator '|' "$db" "
         SELECT
             COUNT(*),
-            COALESCE(SUM(CASE WHEN corroborated_at > 0 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN corroborated_at = 0 THEN 1 ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN gate_version = 2 AND corroborated_at > 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN corroborated_at = 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN gate_version = 0 THEN 1 ELSE 0 END), 0)
         FROM evidence WHERE low_confidence = 1;
     "
 }
@@ -5005,8 +4820,8 @@ _interspect_generate_overlay() {
     reasons=$(sqlite3 -separator '|' "$db" "
         SELECT override_reason, COUNT(*) as cnt
         FROM evidence
-        WHERE (source = '${escaped_agent}' OR source LIKE '%${escaped_agent}')
-          AND event = 'override'
+        WHERE (COALESCE(gate_source, source) = '${escaped_agent}' OR source LIKE '%${escaped_agent}')
+          AND event = 'override' AND COALESCE(quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER)
         GROUP BY override_reason
         ORDER BY cnt DESC
         LIMIT 5;
@@ -5022,8 +4837,8 @@ _interspect_generate_overlay() {
     total_corrections=$(sqlite3 "$db" "
         SELECT COUNT(*)
         FROM evidence
-        WHERE (source = '${escaped_agent}' OR source LIKE '%${escaped_agent}')
-          AND event = 'override';
+        WHERE (COALESCE(gate_source, source) = '${escaped_agent}' OR source LIKE '%${escaped_agent}')
+          AND event = 'override' AND COALESCE(quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER);
     " 2>/dev/null) || total_corrections="0"
 
     # Detect project type

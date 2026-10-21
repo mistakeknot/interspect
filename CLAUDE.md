@@ -21,6 +21,40 @@ python3 -c "import json; json.load(open('hooks/hooks.json'))"           # Hooks 
 
 ## Design Decisions (Do Not Re-Ask)
 
+### Low-confidence evidence gate
+
+Gate operations require Python 3.12+ and SQLite JSON1. Identity is asserted by
+callers, not authenticated: two invented session names can still corroborate.
+Direct database write access is trusted; triggers enforce row invariants, not
+provenance. Merge requires operator acceptance of that boundary.
+
+Raw JSON is validated before shell extraction. Sessions are ASCII lowercase;
+review/finding IDs must already be lowercase and match exactly. Canonical
+`gate_*` columns carry identities separately from diagnostic fields. Both lift
+modes use one parameterized UPDATE; automatic insertion and lift share one
+transaction. Missing run IDs use explicit `session` scope, with the original
+session as scope ID. `unscoped:` is ordinary review text, never a magic prefix.
+
+Migration is transactional, audits prior low-confidence rows, re-quarantines
+legacy lifts and never lifts by itself. Invalid identities or mismatched legacy
+keys remain version zero with NULL keys. Review affected overrides listed in
+`interspect_gate_override_review`; migration does not revert them. Failed
+migration stops gate writes. Old plugin copies cannot lift migrated rows.
+Gate statistics include flagged, corroborated, held and invalid/legacy-held counts.
+
+Before rollout, pause writers and rehearse on a consistent database copy outside
+git. Disable corroboration for rollback; with writers still paused, drop only
+the `interspect_gate_insert`/`interspect_gate_update` triggers and
+`interspect_gate_schema` marker, re-quarantine every low-confidence row and
+clear its corroboration timestamp/actor/mode in one transaction. Retain audit
+tables and do not resume old gate code or restore legacy lifts. A subsequent
+forward repair requires reviewed reconciliation, not automatic rerun.
+
+Verification: `bash tests/shell/test_low_confidence_gate.sh` and
+`cd tests && uv run pytest -q structural/test_gate_*.py`, followed by the full
+structural and shell suites. The shared structural fixture package must be on
+`PYTHONPATH` when testing a standalone clone.
+
 - Namespace: `interspect:` (companion to Clavain)
 - Evidence stored in `.clavain/interspect/interspect.db` (SQLite)
 - Routing overrides written to `.claude/routing-overrides.json` (cross-repo contract)
