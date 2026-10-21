@@ -344,6 +344,48 @@ ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source='fd-safety' AND
 assert_eq "M4: with a producer-supplied review_run_id, two independent resolutions on the same finding DO corroborate" "$ROWS" "2"
 
 echo ""
+echo "=== Bypass attempts: run identity, actor, unscoped rows ==="
+
+# P1: no synthesis_timestamp -> no run identity (no basename fallback).
+NOTS_DIR="$TEST_DIR/flux-drive-nots"
+mkdir -p "$NOTS_DIR"
+echo '{"findings": []}' > "$NOTS_DIR/findings.json"
+RID_NOTS=$(_interspect_review_id_from_findings "$NOTS_DIR/findings.json") && NOTS_RC=0 || NOTS_RC=$?
+assert_eq "P1: findings.json without synthesis_timestamp yields no review_id" "$RID_NOTS" ""
+assert_eq "P1: ...and the helper reports failure" "$NOTS_RC" "1"
+RID_MISSING=$(_interspect_review_id_from_findings "$NOTS_DIR/absent.json") && MISSING_RC=0 || MISSING_RC=$?
+assert_eq "P1: unreadable findings.json yields no review_id (rc 1)" "$RID_MISSING|$MISSING_RC" "|1"
+
+# P2a: omitted or empty corroborating actor is refused and lifts nothing.
+sqlite3 "$DB" "DELETE FROM evidence;"
+_interspect_insert_evidence "sess-orig" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"run-b","finding_id":"P0-1"}' "interspect-correction"
+OUT=$(_interspect_corroborate_evidence "fd-bypass" "run-b" "P0-1") && RC=0 || RC=$?
+assert_eq "P2: omitted corroborating actor is refused (rc 1, no output)" "$RC|$OUT" "1|"
+OUT=$(_interspect_corroborate_evidence "fd-bypass" "run-b" "P0-1" "") && RC=0 || RC=$?
+assert_eq "P2: empty corroborating actor is refused (rc 1, no output)" "$RC|$OUT" "1|"
+STILL=$(sqlite3 "$DB" "SELECT low_confidence, corroborated_at FROM evidence WHERE session_id='sess-orig';")
+assert_eq "P2: refused calls leave the gate in place" "$STILL" "1|0"
+
+# P2b: a gated row with no review_id is bound to its own session and can be
+# lifted explicitly, but never by a second correction and never by itself.
+sqlite3 "$DB" "DELETE FROM evidence;"
+_interspect_insert_evidence "sess-u1" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"finding_id":"P0-7"}' "interspect-correction"
+KEY=$(sqlite3 "$DB" "SELECT finding_key FROM evidence WHERE session_id='sess-u1';")
+assert_eq "P2: unscoped gated row gets a session-bound finding_key" "$KEY" "unscoped:sess-u1:P0-7"
+_interspect_insert_evidence "sess-u2" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"finding_id":"P0-7"}' "interspect-correction"
+ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE corroborated_at > 0;")
+assert_eq "P2: a second unscoped correction does NOT corroborate" "$ROWS" "0"
+AFFECTED=$(_interspect_corroborate_evidence "fd-bypass" "unscoped:sess-u1" "P0-7" "sess-u1")
+assert_eq "P2: the original session cannot lift its own unscoped row" "$AFFECTED" "0"
+AFFECTED=$(_interspect_corroborate_evidence "fd-bypass" "unscoped:sess-u1" "P0-7" "sess-judge")
+assert_eq "P2: a different named session lifts the unscoped row" "$AFFECTED" "1"
+LEFT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE session_id='sess-u2' AND corroborated_at > 0;")
+assert_eq "P2: the other session's unscoped row stays gated" "$LEFT" "0"
+
+echo ""
 echo "=== Existing (non-flagged) behaviour is unchanged ==="
 
 sqlite3 "$DB" "DELETE FROM evidence;"

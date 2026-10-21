@@ -3116,9 +3116,11 @@ _interspect_validate_hook_id() {
 # finding IDs (e.g. "P0-1") collided in finding_key, letting an unrelated
 # rerun's flag corroborate a stale one. Append synthesis_timestamp (unique
 # per run, part of the findings.json schema — synthesis.md :292) when
-# present so reruns never share a review_id. Falls back to the bare basename
-# when synthesis_timestamp is absent (older findings.json, or lookup
-# failure) — best-effort, same as the caller in interspect-correction.md.
+# present so reruns never share a review_id. When synthesis_timestamp is
+# absent or unreadable there is no way to tell reruns apart, so this prints
+# nothing and returns 1 rather than falling back to the bare basename: callers
+# then omit review_id and the row is corroborated only explicitly (see
+# _interspect_insert_evidence).
 # Args: $1=findings_json_path
 _interspect_review_id_from_findings() {
     local findings_json="$1"
@@ -3128,11 +3130,8 @@ _interspect_review_id_from_findings() {
     if [[ -f "$findings_json" ]] && command -v jq >/dev/null 2>&1; then
         ts=$(jq -r '.synthesis_timestamp // empty' "$findings_json" 2>/dev/null) || ts=""
     fi
-    if [[ -n "$ts" ]]; then
-        echo "${base}@${ts}"
-    else
-        echo "$base"
-    fi
+    [[ -n "$ts" ]] || return 1
+    echo "${base}@${ts}"
 }
 
 # Insert an evidence row with sanitization.
@@ -3217,6 +3216,11 @@ _interspect_insert_evidence() {
     local finding_key=""
     if [[ -n "$finding_id" && -n "$review_id" ]]; then
         finding_key="${review_id}:${finding_id}"
+    elif [[ "$is_low_confidence" == 1 && -n "$finding_id" ]]; then
+        # No run identity: key the row to its own session so it can never
+        # match another row, but can still be lifted explicitly with
+        # _interspect_corroborate_evidence <source> "unscoped:<session_id>" <finding_id> <other actor>.
+        finding_key="unscoped:${session_id}:${finding_id}"
     fi
 
     # Sanitize user-controlled fields
@@ -3305,16 +3309,21 @@ _interspect_insert_evidence() {
 # re-judge pass or an explicit human confirmation records corroboration this
 # way instead of a second override).
 # Args: $1=source (agent) $2=review_id $3=finding_id $4=corroborated_by
-#   (a session/actor identifier for the corroborating signal — round-2 N3:
-#   rows whose session_id equals corroborated_by are excluded from the
+#   (REQUIRED, non-empty — a session/actor identifier for the corroborating
+#   signal; round-2 N3: rows whose session_id equals corroborated_by are excluded from the
 #   UPDATE, so the session that set the gate can never lift its own gate
 #   through this path either).
 # Matches the real finding_key column (review_id:finding_id), same as
 # _interspect_insert_evidence (round-2 M1/M3).
+# Rows recorded without a run identity use review_id "unscoped:<their session_id>".
 # Output: count of rows corroborated (0 if none were gated for that finding).
+# Returns 1 (no output) on missing source/review_id/finding_id/corroborated_by.
 _interspect_corroborate_evidence() {
     local source="$1" review_id="$2" finding_id="$3" corroborated_by="${4:-}"
     [[ -n "$source" && -n "$review_id" && -n "$finding_id" ]] || return 1
+    # The corroborating actor is mandatory: with it empty the session
+    # independence check below would not exclude anyone.
+    [[ -n "$corroborated_by" ]] || return 1
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || return 1
     local e_source e_finding_key e_corroborated_by now

@@ -56,11 +56,11 @@ if [[ -n "$FINDING_ID" && -f "$FINDINGS_JSON" ]] && command -v jq &>/dev/null; t
     LOW_CONFIDENCE=$(jq -r --arg id "$FINDING_ID" \
         '(.findings[] | select(.id == $id) | .low_confidence) // false' \
         "$FINDINGS_JSON" 2>/dev/null) || LOW_CONFIDENCE="false"
-    [[ -z "$REVIEW_ID" ]] && REVIEW_ID="$(_interspect_review_id_from_findings "$FINDINGS_JSON")"
+    [[ -z "$REVIEW_ID" ]] && REVIEW_ID="$(_interspect_review_id_from_findings "$FINDINGS_JSON" || true)"
 fi
 ```
 
-This is best-effort — if no finding ID is identifiable or no `findings.json` is in scope, `LOW_CONFIDENCE` stays `"false"` and the correction is recorded exactly as before. Never block on this lookup. If `LOW_CONFIDENCE` is true but `REVIEW_ID` could not be determined, still pass `finding_id` through (the row is gated, fail-safe) but omit `review_id` — such a row can only be lifted via explicit `_interspect_corroborate_evidence`, never by a second correction, since an un-namespaced key never self-matches.
+This is best-effort — if no finding ID is identifiable or no `findings.json` is in scope, `LOW_CONFIDENCE` stays `"false"` and the correction is recorded exactly as before. Never block on this lookup. If `LOW_CONFIDENCE` is true but `REVIEW_ID` could not be determined, still pass `finding_id` through (the row is gated, fail-safe) but omit `review_id` — such a row can only be lifted via explicit `_interspect_corroborate_evidence <source> "unscoped:<original session_id>" <finding_id> <corroborating session>` (the corroborating session is required and must differ from the original), never by a second correction, since its key is bound to its own session. The same holds when `findings.json` has no `synthesis_timestamp`: no run identity can be derived, so `REVIEW_ID` stays empty.
 
 ## Record Evidence
 
