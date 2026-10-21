@@ -307,3 +307,68 @@ def test_runtime_python_and_json1():
                              'print(sqlite3.connect(":memory:").execute("SELECT json_array(1)").fetchone()[0])'],
                             text=True, capture_output=True)
     assert result.returncode == 0 and result.stdout.strip() == '[1]'
+
+
+@pytest.mark.parametrize('seed', SEEDS)
+def test_generated_review_join_is_injective(tmp_path, seed):
+    rng = random.Random(seed)
+    seen = {}
+    for _ in range(32):
+        parts = ['x' + ''.join(rng.choices('ab09:@+.-', k=6)) for _ in range(3)]
+        # Both separators are allowed in raw review/finding identities. A
+        # producer-derived review must still identify its components uniquely.
+        for delimiter in (':', '@'):
+            a, b, c = parts
+            for base, timestamp in [(a + delimiter + b, c), (a, b + delimiter + c)]:
+                path = tmp_path / base / 'findings.json'
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(json.dumps(dict(synthesis_timestamp=timestamp)))
+                result = subprocess.run(['python3', str(MODULE), 'review-id', str(path)],
+                                        capture_output=True, text=True, timeout=10)
+                if result.returncode:
+                    assert result.stdout == ''
+                    continue
+                identity = result.stdout.strip()
+                assert seen.setdefault(identity, (base, timestamp)) == (base, timestamp), (seed, identity)
+    assert seen, 'The join fuzz must exercise accepted identities, not only rejection.'
+
+
+@pytest.mark.parametrize('delimiter', [':', '@'])
+@pytest.mark.parametrize('seed', SEEDS)
+def test_structured_finding_and_scope_joins_do_not_collide(db, delimiter, seed):
+    rng = random.Random(seed)
+    for i in range(12):
+        a, b, c = ['x' + ''.join(rng.choices('ab09:@', k=5)) for _ in range(3)]
+        contexts = [dict(review_id=a + delimiter + b, finding_id=c),
+                    dict(review_id=a, finding_id=b + delimiter + c),
+                    dict(finding_id=a + delimiter + b),
+                    dict(review_id='unscoped:scope-a', finding_id=a + delimiter + b)]
+        with sqlite3.connect(db) as conn:
+            conn.execute('DELETE FROM evidence')
+        for n, context in enumerate(contexts):
+            context['low_confidence'] = True
+            result = cli(db, 'insert', row('scope-a' if n == 2 else f'session-{n}',
+                                         context=json.dumps(context)))
+            assert result.returncode == 0, result.stderr
+        evidence = rows(db)
+        assert len({r['gate_key'] for r in evidence}) == 4, (seed, i)
+        assert all(r['gate_version'] == 2 and r['corroborated_at'] == 0 for r in evidence)
+        # Legacy colon joins reconstruct from separate components, never split.
+        with sqlite3.connect(db) as conn:
+            conn.execute('DROP TRIGGER interspect_gate_insert')
+            conn.execute('DROP TRIGGER interspect_gate_update')
+            conn.execute('DROP TABLE interspect_gate_schema')
+            for observed, context in zip(evidence, contexts):
+                scope = context.get('review_id', 'unscoped:' + observed['session_id'])
+                conn.execute('UPDATE evidence SET gate_version=0, context=?, finding_key=? WHERE id=?',
+                             (json.dumps(context), scope + ':' + context['finding_id'], observed['id']))
+        assert cli(db, 'migrate', {}).returncode == 0
+        evidence = rows(db)
+        assert len({r['gate_key'] for r in evidence}) == 4
+        assert all(r['gate_version'] == 2 and r['corroborated_at'] == 0 for r in evidence)
+
+
+@pytest.mark.parametrize('field', ['session_id', 'actor', 'source', 'override_reason', 'finding_key'])
+@pytest.mark.parametrize('delimiter', [':', '@'])
+def test_delimiters_cannot_forge_other_canonical_fields(db, field, delimiter):
+    _exercise_forged_fields(db, field, BASE_VALUE[field] + delimiter + 'other')

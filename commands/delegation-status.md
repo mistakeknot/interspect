@@ -37,9 +37,9 @@ echo ""
 
 # ─── Overall Stats ────────────────────────────────────────────────────────────
 
-TOTAL=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE event='delegation_outcome' AND source='codex-delegate';")
-PASS_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE event='delegation_outcome' AND source='codex-delegate' AND json_extract(context, '$.verdict') IN ('pass','CLEAN');")
-RETRY_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE event='delegation_outcome' AND source='codex-delegate' AND json_extract(context, '$.retry_needed')=1;")
+TOTAL=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE event='delegation_outcome' AND source='codex-delegate' AND $(_interspect_eligible_sql);")
+PASS_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE event='delegation_outcome' AND source='codex-delegate' AND $(_interspect_eligible_sql) AND json_extract(context, '$.verdict') IN ('pass','CLEAN');")
+RETRY_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE event='delegation_outcome' AND source='codex-delegate' AND $(_interspect_eligible_sql) AND json_extract(context, '$.retry_needed')=1;")
 
 if [[ "$TOTAL" -eq 0 ]]; then
     echo "No delegation outcomes recorded yet."
@@ -70,7 +70,7 @@ sqlite3 -separator $'\t' "$DB" "
         ROUND(100.0 * SUM(CASE WHEN json_extract(context, '$.verdict') IN ('pass','CLEAN') THEN 1 ELSE 0 END) / COUNT(*)) as pr,
         ROUND(AVG(json_extract(context, '$.duration_s')), 1) as avg_dur
     FROM evidence
-    WHERE event='delegation_outcome' AND source='codex-delegate'
+    WHERE event='delegation_outcome' AND source='codex-delegate' AND $(_interspect_eligible_sql)
     GROUP BY cat
     ORDER BY cnt DESC;
 " | while IFS=$'\t' read -r cat count pr dur; do
@@ -84,7 +84,7 @@ echo ""
 ATTENTION=$(sqlite3 -separator ', ' "$DB" "
     SELECT json_extract(context, '$.category')
     FROM evidence
-    WHERE event='delegation_outcome' AND source='codex-delegate'
+    WHERE event='delegation_outcome' AND source='codex-delegate' AND $(_interspect_eligible_sql)
     GROUP BY json_extract(context, '$.category')
     HAVING (100.0 * SUM(CASE WHEN json_extract(context, '$.verdict') IN ('pass','CLEAN') THEN 1 ELSE 0 END) / COUNT(*)) < 70
         AND COUNT(*) >= 3;
@@ -111,7 +111,7 @@ sqlite3 -separator $'\t' "$DB" "
         json_extract(context, '$.verdict'),
         json_extract(context, '$.duration_s')
     FROM evidence
-    WHERE event='delegation_outcome' AND source='codex-delegate'
+    WHERE event='delegation_outcome' AND source='codex-delegate' AND $(_interspect_eligible_sql)
     ORDER BY ts DESC
     LIMIT 5;
 " | while IFS=$'\t' read -r ts cat tier verdict dur; do

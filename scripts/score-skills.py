@@ -88,6 +88,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from routing_calibration_writer import CalibrationWriteError, merge_calibration
+from interspect_gate import eligible_sql
 
 
 # ─── Repo-root / DB discovery (mirrors ingest-skill-audit.py) ────────────────
@@ -281,6 +282,7 @@ def qualifying_skills(
             "       COUNT(DISTINCT source_event_id) AS n "
             "FROM evidence "
             "WHERE source_kind = 'skill' "
+            f"  AND {eligible_sql()} "
             "  AND event = 'skill_invocation' "
             "  AND source_event_id IS NOT NULL "
             "  AND ts >= ? "
@@ -306,11 +308,15 @@ class SignalRow(NamedTuple):
 def signal_rows(
     conn: sqlite3.Connection, skill_name: str, lower_bound: str
 ) -> list[SignalRow]:
-    """All in-window skill_signals rows for one skill."""
+    """In-window signals whose invocation evidence is eligible for calibration."""
     rows = conn.execute(
-        "SELECT signal_kind, value, observed_at "
-        "FROM skill_signals "
-        "WHERE skill_name = ? AND observed_at >= ?",
+        "SELECT s.signal_kind, s.value, s.observed_at "
+        "FROM skill_signals s "
+        "WHERE s.skill_name = ? AND s.observed_at >= ? "
+        "AND EXISTS (SELECT 1 FROM evidence e "
+        "WHERE e.source_event_id=s.invocation_id AND e.source=s.skill_name "
+        "AND e.session_id=s.session_id AND e.source_kind='skill' "
+        f"AND e.event='skill_invocation' AND {eligible_sql('e')})",
         (skill_name, lower_bound),
     ).fetchall()
     out: list[SignalRow] = []

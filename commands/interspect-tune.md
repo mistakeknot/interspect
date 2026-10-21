@@ -60,7 +60,7 @@ Check `.clavain/interspect/overlays/$TARGET/tuning.md`; if it exists, ask "Regen
 ### Tool mode (KIND=tool)
 
 ```bash
-PATTERN_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source = '$TARGET' AND source_kind = 'tool';" 2>/dev/null || echo "0")
+PATTERN_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source = '$TARGET' AND source_kind = 'tool' AND $(_interspect_eligible_sql);" 2>/dev/null || echo "0")
 ```
 If 0: "No tool-pattern evidence found for $TARGET."
 

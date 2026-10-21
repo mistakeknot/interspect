@@ -3373,7 +3373,7 @@ _interspect_decomposition_calibration_ready() {
     [[ -f "$db" ]] || { echo "0"; return 1; }
 
     local count
-    count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event = 'decomposition_outcome' AND quarantine_until <= $(date +%s);" 2>/dev/null) || count=0
+    count=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE event = 'decomposition_outcome' AND $(_interspect_eligible_sql);" 2>/dev/null) || count=0
 
     echo "$count"
     [[ "$count" -ge "$threshold" ]]
@@ -3395,7 +3395,7 @@ _interspect_review_calibration_ready() {
             SELECT json_extract(context, '$.phase') as phase, COUNT(*) as cnt
             FROM evidence
             WHERE event = 'review_phase_outcome'
-              AND quarantine_until <= $now
+              AND $(_interspect_eligible_sql)
             GROUP BY phase
             HAVING phase IN ('brainstorm', 'strategy', 'plan')
         );
@@ -3436,7 +3436,7 @@ _interspect_calibrate_reviews() {
             AVG(COALESCE(json_extract(context, '$.agents'), 0)) as avg_agents
         FROM evidence
         WHERE event = 'review_phase_outcome'
-          AND quarantine_until <= $now
+          AND $(_interspect_eligible_sql)
         GROUP BY phase, complexity
         HAVING total_reviews >= 3
         ORDER BY phase, complexity;
@@ -3877,6 +3877,7 @@ _interspect_compute_delegation_stats() {
         FROM evidence
         WHERE event = 'delegation_outcome'
           AND source = 'codex-delegate'
+          AND $(_interspect_eligible_sql)
         ORDER BY ts
     " 2>/dev/null) || raw="[]"
 
@@ -3948,7 +3949,7 @@ _interspect_compute_plan_execution_stats() {
             json_extract(context, '\$.session_source')  AS session_source
         FROM evidence
         WHERE event='plan_execution_outcome'
-          AND (quarantine_until IS NULL OR quarantine_until <= strftime('%s','now'));
+          AND $(_interspect_eligible_sql);
     " 2>/dev/null | python3 -c "
 import json, sys
 
@@ -4955,6 +4956,7 @@ _interspect_compute_tool_baseline() {
         WHERE source = '${escaped}'
           AND source_kind = 'tool'
           AND ts > datetime('now', '-${window_days} days')
+          AND $(_interspect_eligible_sql)
         GROUP BY event;
     " 2>/dev/null) || raw="[]"
 
@@ -4982,7 +4984,8 @@ _interspect_count_tool_pattern_recurrence() {
         FROM evidence
         WHERE source = '${escaped_src}'
           AND source_kind = 'tool'
-          AND ts > '${escaped_ts}';
+          AND ts > '${escaped_ts}'
+          AND $(_interspect_eligible_sql);
     " 2>/dev/null || echo "0"
 }
 

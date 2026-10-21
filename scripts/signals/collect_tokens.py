@@ -44,6 +44,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     default_db_path,
+    eligible_sql,
     find_repo_root,
     log,
     pending_evidence,
@@ -248,7 +249,8 @@ def collect(
     def sessions_running(skill_name: str) -> set[str]:
         rows = conn.execute(
             "SELECT DISTINCT session_id FROM evidence "
-            "WHERE source_kind='skill' AND event='skill_invocation' AND source = ?",
+            "WHERE source_kind='skill' AND event='skill_invocation' AND source = ? "
+            f"AND {eligible_sql()}",
             (skill_name,),
         ).fetchall()
         return {r[0] for r in rows}

@@ -15,11 +15,25 @@ from datetime import datetime, timezone
 SENTINEL = 4102444800
 REASONS = ('agent_wrong', 'deprioritized', 'already_fixed', 'stale_finding',
            'not_applicable', 'severity_miscalibrated')
-GUARD_REVISION = 1
+GUARD_REVISION = 2
 
 
 class GateDependencyError(RuntimeError):
     pass
+
+
+def eligible_sql(alias=''):
+    """Read-only counterpart of _interspect_eligible_sql, also for skill readers.
+
+    Keep the predicates byte-identical (parity tested); shell callers do not
+    need a Python subprocess for every query. Only internal aliases are allowed.
+    """
+    if alias and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', alias) is None:
+        raise ValueError('invalid SQL alias')
+    p = alias + '.' if alias else ''
+    return (f"(COALESCE({p}quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER) "
+            f"AND ({p}low_confidence=0 OR ({p}low_confidence=1 AND {p}gate_version=2 "
+            f"AND {p}corroborated_at>0 AND {p}quarantine_until=0)))")
 
 
 def require_json1(db):
@@ -257,12 +271,22 @@ def migrate(db, overrides_path=None):
         candidates = [dict(zip(names, row)) for row in cursor.fetchall()]
         rows = [row for row in candidates if row['low_confidence'] == 1 or
                 (row['source_kind'] == 'agent' and context_requires_gate(row['context']))]
-        lifted_ids = set()
+        # Include every row exposed to prior readers, not just explicit lifts.
+        # The old expiry-only readers also consumed uncorroborated/context-only
+        # flags once quarantine elapsed. Repair must consult retained audits:
+        # an earlier migration may already have held a row without reporting it.
+        now = int(time.time())
+        exposed_ids = {r[0] for r in db.execute(
+            'SELECT id FROM evidence WHERE COALESCE(quarantine_until,0)<=? '
+            'OR corroborated_at>0', (now,))}
+        exposed_ids.update(r[0] for r in db.execute(
+            "SELECT evidence_id FROM interspect_gate_audit WHERE "
+            "COALESCE(json_extract(previous_row,'$.quarantine_until'),0)<=? "
+            "OR json_extract(previous_row,'$.corroborated_at')>0", (now,)))
+        affected_ids = exposed_ids.intersection(row['id'] for row in rows)
         for row in rows:
             db.execute('INSERT OR IGNORE INTO interspect_gate_audit VALUES (?,?)',
                        (row['id'], json.dumps(row, ensure_ascii=True)))
-            if row['corroborated_at'] and row['corroborated_at'] > 0:
-                lifted_ids.add(row['id'])
             fields = dict(gate_version=0, **{col: None for col in GATE_COLUMNS if col.startswith('gate_') and col != 'gate_version'})
             try:
                 if row['source_kind'] != 'agent':
@@ -299,7 +323,16 @@ def migrate(db, overrides_path=None):
             if not isinstance(overrides, list):
                 raise ValueError('invalid routing overrides')
             for override in overrides:
-                if lifted_ids.intersection(override.get('evidence_ids', [])):
+                if not isinstance(override, dict) or not isinstance(override.get('evidence_ids', []), list):
+                    raise ValueError('invalid override evidence IDs')
+                # Writers accept JSON arrays without constraining member types.
+                # Resolve scalar references using the actual INTEGER PK affinity:
+                # 1, "1", 1.0, "01", "1e0", etc. refer to the same evidence.
+                # json_each.atom is NULL for arrays/objects (not references).
+                references = {r[0] for r in db.execute(
+                    'SELECT id FROM evidence WHERE id IN (SELECT atom FROM json_each(?))',
+                    (json.dumps(override.get('evidence_ids', [])),))}
+                if affected_ids.intersection(references):
                     encoded = json.dumps(override, sort_keys=True)
                     db.execute('INSERT INTO interspect_gate_override_review SELECT ? '
                                'WHERE NOT EXISTS (SELECT 1 FROM interspect_gate_override_review WHERE override_json=?)',
@@ -317,6 +350,9 @@ def migrate(db, overrides_path=None):
         if rows:
             print(f'interspect gate: {len(rows)} evidence rows held after migration; '
                   'see interspect_gate_audit', file=sys.stderr)
+        if affected_ids:
+            print('interspect gate: previously eligible evidence now held: '
+                  + json.dumps(sorted(affected_ids)), file=sys.stderr)
     except BaseException:
         db.rollback()
         raise
@@ -468,10 +504,9 @@ def disagreement_requests(raw):
         reason = 'severity_miscalibrated'
     if not event.get('finding_id') or not event.get('resolution') or not event.get('chosen_severity'):
         return []
-    if 'low_confidence' in event and type(event['low_confidence']) is not bool:
-        raise ValueError('invalid low-confidence classification')
     # Missing classification is uncertain, never evidence of high confidence.
-    low = event.get('low_confidence', True) or severity_conflict
+    # Validate both locations before any OR can short-circuit validation.
+    low = event_confidence(event) or event.get('low_confidence', True) or severity_conflict
     result = []
     for agent, severity in agents.items():
         if severity == event['chosen_severity']:
@@ -547,6 +582,10 @@ def review_id_from_findings(path):
         if not isinstance(component, str) or not component.isascii() or re.fullmatch(
                 r'[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}', component, flags=re.ASCII) is None:
             raise ValueError('invalid review run component')
+    # The first @ is the component boundary. Without this restriction, (a@b,c)
+    # and (a,b@c) both become a@b@c and can spuriously corroborate each other.
+    if '@' in base:
+        raise ValueError('ambiguous review basename')
     combined = base + '@' + timestamp
     if len(combined) > 256:
         raise ValueError('review run identity too long')

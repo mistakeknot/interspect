@@ -38,6 +38,9 @@ invalid. Canonical
 modes use one parameterized UPDATE; automatic insertion and lift share one
 transaction. Missing run IDs use explicit `session` scope, with the original
 session as scope ID. `unscoped:` is ordinary review text, never a magic prefix.
+Derived `basename@timestamp` review IDs reject basenames containing `@`; the
+first `@` is therefore the unique boundary. Colons remain valid in either
+component, and explicit review/finding IDs still allow `:` and `@`.
 
 Migration is transactional, audits prior low-confidence rows, re-quarantines
 legacy lifts and never lifts by itself. Invalid identities or mismatched legacy
@@ -52,9 +55,17 @@ strictly parsed. It prints the held-row count and a REVIEW REQUIRED override
 count. Audit records and override-review entries are retained on repeat repair.
 The v2 marker's `guard_revision` upgrades pre-fix guards transactionally; such
 an upgrade re-quarantines evidence and preserves valid canonical v2 identities.
+Revision 2 also repairs override reporting from retained audit snapshots. It
+prints every previously exposed evidence ID now held, including context-only
+flags whose quarantine expired without a corroboration timestamp. Override
+evidence references are matched using SQLite INTEGER primary-key affinity, so
+`1`, `"1"`, `1.0`, `"01"` and equivalent numeric strings refer to the same row.
+Non-reference arrays/objects in an evidence-ID array do not abort reconciliation.
+These reports never automatically reverse an override.
 
-Disagreements honor an explicit true flag regardless of dismissal reason;
-missing classification is held and non-boolean flags are refused. Execution
+Disagreements use `event_confidence()` to honor top-level or nested true flags
+regardless of dismissal reason, and reject malformed contexts/non-boolean flags.
+Missing top-level classification remains conservatively held. Execution
 defects and kernel events also pass raw JSON through the Python bridge, honoring
 top-level and nested confidence flags before any shell extraction. Ordinary
 execution/kernel events may omit the flag. Flagged rows without a valid fd-agent,
@@ -65,9 +76,12 @@ agent flag/context guard. The harness writer currently emits `source_kind=memory
 which the production evidence CHECK already excludes; these changes do not
 alter that independent schema mismatch.
 
-Routing, overlay drafts, tune preconditions, auto-apply baselines, agent scores
-and effectiveness readers share `_interspect_eligible_sql`. Held rows remain
-visible in explicitly diagnostic gate statistics, never as eligible evidence.
+Routing, overlay drafts, tune preconditions, delegation outcomes, tool canaries,
+review/decomposition/plan calibration, agent scores and effectiveness readers
+share `_interspect_eligible_sql`. Python skill readers use its byte-equivalent
+`eligible_sql` counterpart, tested for parity. Skill signal scoring requires an
+eligible invocation row too. Held rows remain visible in raw diagnostics and
+gate-control scans, never as eligible evidence for learned decisions.
 
 Before rollout, pause writers and rehearse on a consistent database copy outside
 git. Disable corroboration for rollback; with writers still paused, drop only
