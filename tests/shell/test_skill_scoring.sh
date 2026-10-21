@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for sylveste-7aj8.5: weighted per-skill scoring (scripts/score-skills.py).
+# Tests: weighted per-skill scoring (scripts/score-skills.py).
 #
 # Seeds a scratch DB with synthetic skill evidence + signals + goals and verifies:
 #   1. Only skills with >= --min-invocations distinct invocations in the window score

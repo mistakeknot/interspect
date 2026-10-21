@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Infer per-skill goal weights for the Interspect skill calibrator (sylveste-7aj8.4).
+"""Infer per-skill goal weights for the Interspect skill calibrator.
 
 Classifies each registered skill into a goal-weight vector
 `{speed, precision, completeness}` that sums to 1.0, persisted in the
@@ -30,7 +30,7 @@ Plugin SKILL.md files live under the cache layout
 user skills live at `~/.claude/skills/<skill>/SKILL.md` (namespace = bare name);
 project skills at `<repo>/.claude/skills/<skill>/SKILL.md`.
 
-COMMAND enumeration (sylveste-7aj8.8) covers the highest-traffic surfaces. Commands
+COMMAND enumeration covers the highest-traffic surfaces. Commands
 fire as `tool:"Skill"` events too (that's why `clavain:sprint`, `interflux:flux-drive`
 appear in the scoring leaderboard), but they are SINGLE `.md` files directly in a
 `commands/` dir — not a dir containing SKILL.md. They are enumerated identically and
@@ -71,7 +71,7 @@ Usage:
 # Intended weekly cadence — classify new/changed skills + refine from signals:
 #
 #   # m h dom mon dow   command
-#   0 4 * * 1  cd /home/mk/projects/Sylveste/interverse/interspect && \
+#   0 4 * * 1  cd /path/to/interspect && \
 #              python3 scripts/infer-skill-goals.py >> \
 #              ~/.claude/interspect/skill-goals-cron.log 2>&1
 #

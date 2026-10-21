@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for sylveste-ioe7: interlab -> interspect mutation feedback loop.
+# Tests: interlab -> interspect mutation feedback loop.
 #
 # Verifies:
 #   1. interspect-interlab-mutation hook_id is allowlisted

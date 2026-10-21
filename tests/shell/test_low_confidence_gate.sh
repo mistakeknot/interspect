@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for Sylveste-06i.4 Option A: severity-tier confidence gate.
+# Tests: (Option A) severity-tier confidence gate.
 #
 # Verifies:
 #   1. Migration adds low_confidence/corroborated_at/finding_key columns on

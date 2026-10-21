@@ -59,25 +59,40 @@ fi
 # Consume kernel events (catch up since last session)
 _interspect_consume_kernel_events "$SESSION_ID" 2>/dev/null || true
 
-# Skill evidence catch-up ingest (sylveste-7aj8.2): drain any Skill rows
+# Skill evidence catch-up ingest: drain any Skill rows
 # accumulated since the last run into evidence + skill_signals. Backgrounded
 # and fail-open so it never delays or breaks session start.
 if command -v python3 &>/dev/null; then
     ( python3 "${SCRIPT_DIR}/../scripts/ingest-skill-audit.py" \
         --db "$_INTERSPECT_DB" >/dev/null 2>&1 || true ) &
 
-    # Skill-signal collectors (sylveste-7aj8.3): normalize pending skill
+    # Skill-signal collectors: normalize pending skill
     # evidence into skill_signals. The slow collectors (bead_close, no_redirect,
     # tokens) read .beads/issues.jsonl, session transcripts, and cass — all
     # fail-open. Backgrounded and capped via --limit so session start stays
     # cheap. The inline 'error' signal is written by ingest, so its catch-up
     # collector is omitted here.
+    #
+    # With many sessions starting at once (parallel agents on one host), each
+    # session used to launch its own copy of these collectors, which read whole
+    # transcripts, and the copies piled up and starved the machine. So only one
+    # catch-up pass runs per DB at a time (non-blocking flock; a session that
+    # loses the race skips, since the running pass drains the same backlog and
+    # the next session retries), and the pass runs at the lowest CPU and I/O
+    # priority. Without flock (e.g. stock macOS) it runs unserialized, as before.
     _SIGNALS_DIR="${SCRIPT_DIR}/../scripts/signals"
     if [[ -d "$_SIGNALS_DIR" ]]; then
         (
+            if command -v flock &>/dev/null; then
+                exec 2>/dev/null 9>"${_INTERSPECT_DB}.collect.lock" || exit 0
+                flock -n 9 || exit 0
+            fi
+            _LOWPRI=()
+            command -v nice &>/dev/null && _LOWPRI+=(nice -n 19)
+            command -v ionice &>/dev/null && _LOWPRI=(ionice -c 3 ${_LOWPRI[@]+"${_LOWPRI[@]}"})
             for _c in collect_bead_close collect_no_redirect collect_tokens; do
-                python3 "${_SIGNALS_DIR}/${_c}.py" --db "$_INTERSPECT_DB" \
-                    --limit 200 >/dev/null 2>&1 || true
+                ${_LOWPRI[@]+"${_LOWPRI[@]}"} python3 "${_SIGNALS_DIR}/${_c}.py" \
+                    --db "$_INTERSPECT_DB" --limit 200 >/dev/null 2>&1 || true
             done
         ) &
     fi
@@ -97,7 +112,7 @@ _interspect_sweep_verdicts "${_SWEEP_ROOT}/.clavain/verdicts" "$SESSION_ID" 2>/d
 # Check for canary alerts — evaluate completed canaries first
 _interspect_check_canaries >/dev/null 2>&1 || true
 
-# Build session-start summary (iv-m6cd): active overrides + canary alerts
+# Build session-start summary: active overrides + canary alerts
 SUMMARY_PARTS=()
 
 # Active routing overrides

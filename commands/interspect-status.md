@@ -50,7 +50,7 @@ TOTAL_EVIDENCE=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence;")
 OVERRIDE_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE event = 'override';")
 DISPATCH_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE event = 'agent_dispatch';")
 
-# Signed-receipt count (moat play — sylveste-ewy3.5.4). Receipts live in the
+# Signed-receipt count (moat play). Receipts live in the
 # intercore DB (not the interspect DB); guard for absence — the feature is
 # opt-in (INTERSPECT_SIGNED_RECEIPTS=1) so the action_receipts table may not
 # exist. Verify integrity with `ic receipt verify --since=30d`.

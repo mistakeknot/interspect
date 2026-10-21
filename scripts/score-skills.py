@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weighted per-skill scoring for the Interspect skill calibrator (sylveste-7aj8.5).
+"""Weighted per-skill scoring for the Interspect skill calibrator.
 
 The join point of the skill-calibration pipeline: turns the per-skill SIGNALS
 (written by ``scripts/signals/collect_*.py``) and the per-skill GOAL WEIGHTS
