@@ -199,6 +199,94 @@ an `overlays` directory in the working directory.
 
 ## Testing
 
+The low-confidence gate requires Python 3.12+ and SQLite JSON1. Run
+`bash tests/shell/test_low_confidence_gate.sh` and the structural `test_gate_*.py`
+tests as well as the suite below. Standalone clones need the existing shared
+structural fixtures on `PYTHONPATH`.
+
+Gate identities are caller assertions, not authenticated sessions. Direct DB
+writers are trusted. Canonical `gate_*` columns and structured keys are separate
+from diagnostics; review/finding IDs preserve ASCII case and match exactly
+(including `P0-1` and ISO timestamp review IDs). Missing review
+identity uses explicit session scope, never a special `unscoped:` prefix.
+Generated `basename@timestamp` review IDs reject `@` in the basename so their
+component boundary is unique; explicit review/finding IDs still allow `:` and `@`.
+Migration audits and re-quarantines legacy lifts, holds invalid rows, and lists
+all previously eligible rows it holds, including expired context-only flags.
+Guard revision 3 also permanently holds pre-existing review IDs containing more
+than one `@`: earlier generators did not preserve a unique basename/timestamp
+boundary. These rows retain diagnostics/audits but no usable corroboration key,
+even if the ID was explicit. New unambiguous generation remains supported;
+re-running a repair conservatively holds this shape again.
+Override reconciliation uses SQLite integer-ID affinity (including string IDs)
+and retained audits, reports affected overrides, and never reverses them.
+A migration error stops gate
+writes. See `CLAUDE.md` for rollout, rollback and trust-boundary acceptance.
+
+All agent producers pass confidence classification through the Python gate.
+Disagreement events honor top-level or nested true flags for every dismissal;
+malformed nested contexts and non-boolean flags are rejected. Missing top-level
+classification remains conservatively held. Execution-defect and kernel consumers validate raw JSON before shell
+extraction and preserve top-level/nested flags; their flagged rows without a
+valid routing tuple stay held at v0. Persistent triggers reject agent flag/context
+mismatches. Non-agent shell and skill-audit writes remain independent; harness
+writes use `source_kind=memory`, which the existing production CHECK does not
+support (an independent schema mismatch, not a reason to relax gate guards).
+JSON1 is checked at startup. Base-era NULL finding keys are permanently v0;
+rollback retains audits, and a reviewed forward migration can reuse them.
+Delegation, tool canary, review/decomposition/plan calibration, and skill signal
+readers enforce both ordinary quarantine and corroboration eligibility. Python
+`eligible_sql` mirrors `_interspect_eligible_sql`, with executable parity tests.
+Skill scoring, tuning, invocation counts, baselines and goal refinement share
+`skill_signal_eligible_sql` / `_interspect_skill_signal_eligible_sql`: the backing
+evidence must match invocation ID, skill and session. No eligible signals means
+no overlay body and no refined goal weights. Canary sample creation requires a
+matching collected signal with eligible evidence; evaluation and status recheck
+that relationship so later quarantine or migration excludes retained samples
+from counts and averages. Samples without a matching signal are ineligible.
+Raw diagnostic counts and gate-control scans intentionally retain held rows.
+
+Guard revision 4 invalidates agent canaries whose sample sessions or baseline/
+monitoring windows overlap previously exposed evidence re-held by migration.
+Affected canaries become `needs_review`; their samples are deleted, usage reset,
+and numeric baselines cleared. The migration summary lists their IDs and
+`interspect_gate_override_review` retains the previous canary and samples with
+affected evidence IDs. Evaluation cannot pass/alert these canaries, and status
+ignores any retained samples under them. Missing historical window metadata is
+handled conservatively; operators must reconcile and establish a new canary.
+Overrides remain unchanged. Path-aware override reconciliation is repeatable
+even after an implicit migration without a routing-overrides path. The retained
+`interspect_gate_exposed` IDs also cover later lifts when the original immutable
+audit snapshot captured a held row.
+
+Canary matching resolves the backing agent separately from the modification
+identity: an overlay canary's compound `agent/overlay` group_id invalidates by the
+part before `/` (its baseline is computed from that agent's evidence), and a row
+matches by any source recorded for it, including the `gate_source`/`source` kept in
+its first audit, because a revision-3 repair clears canonical identities of
+ambiguous review IDs. Revision 3 kept no exposure table, so a row its audit shows
+as held (never corroborated) is treated as possibly exposed: a later lift followed
+by another repair would otherwise leave audit and row both merely held. This
+over-invalidates conservatively; operators review the listed canaries. Reverting
+an override or overlay also closes its `needs_review` canaries, and
+`/interspect:interspect-status` reports them as invalidated (not "collecting").
+`calibrate-audit.py` `defect_escape_rate` uses `skill_signal_eligible_sql`, so
+signals tied to ineligible, quarantined or missing invocations never count.
+`interspect-status`, `-propose`, `-approve` and `-tune` stop with an error when
+`_interspect_ensure_db` (including the gate migration) fails, before any decision
+read or canary evaluation. Migration reconciles the validated
+`FLUX_ROUTING_OVERRIDES_PATH` (default `.claude/routing-overrides.json`) and fails
+on an unsafe path. Tool-mode tuning validates `$TARGET` and SQL-escapes it.
+
+Finished-session agent sampling deliberately ignores ordinary time quarantine
+(48 hours by default), while excluding held low-confidence findings. Other
+decision readers retain the full eligibility predicate. Autonomy and agent
+scoring count canonical `gate_session` identities (lowercase raw session fallback)
+and use `gate_source` when present; sampling uses canonical session IDs for
+aggregation and use deduplication. The audit trend's agreement, diversity and
+evidence count exclude ineligible evidence. Agent tune targets must match the
+agent-name regex and are SQL-escaped before querying.
+
 ```bash
 cd tests && uv run pytest -q
 ```

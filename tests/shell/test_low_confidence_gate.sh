@@ -69,7 +69,7 @@ mkdir -p "$OLD_PROJECT_DIR/.clavain/interspect"
 OLD_DB="$OLD_PROJECT_DIR/.clavain/interspect/interspect.db"
 sqlite3 "$OLD_DB" "
     CREATE TABLE evidence (
-        ts TEXT, session_id TEXT, seq INTEGER, source TEXT, source_version TEXT,
+        id INTEGER PRIMARY KEY, ts TEXT, session_id TEXT, seq INTEGER, source TEXT, source_version TEXT,
         event TEXT, override_reason TEXT, context TEXT, project TEXT,
         project_lang TEXT, project_type TEXT
     );
@@ -109,11 +109,11 @@ export INTERSPECT_QUARANTINE_HOURS=0
 # low_confidence and passes a run-scoped review_id alongside the positional
 # finding_id (M1) — the two combine into finding_key.
 _interspect_insert_evidence "sess-1" "fd-safety" "override" "agent_wrong" \
-    '{"low_confidence":true,"review_id":"run-x","finding_id":"P0-1"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-x","finding_id":"p0-1"}' "interspect-correction"
 
-ROW=$(sqlite3 "$DB" "SELECT low_confidence, quarantine_until, corroborated_at, finding_key FROM evidence WHERE session_id='sess-1';")
+ROW=$(sqlite3 "$DB" "SELECT low_confidence, quarantine_until, corroborated_at, gate_key FROM evidence WHERE session_id='sess-1';")
 assert_eq "flagged row: low_confidence=1, sentinel quarantine, not corroborated, finding_key set" \
-    "$ROW" "1|${_INTERSPECT_LOW_CONFIDENCE_SENTINEL}|0|run-x:P0-1"
+    "$ROW" "1|${_INTERSPECT_LOW_CONFIDENCE_SENTINEL}|0|[\"v2\",\"review\",\"run-x\",\"p0-1\"]"
 
 RESULT=$(_interspect_is_routing_eligible fd-safety) || true
 assert_contains "flagged-only evidence: not eligible (no counted override events)" "$RESULT" "not_eligible"
@@ -122,7 +122,7 @@ echo ""
 echo "=== Corroboration via a second independent session (matching run + reason) ==="
 
 _interspect_insert_evidence "sess-2" "fd-safety" "override" "agent_wrong" \
-    '{"low_confidence":true,"review_id":"run-x","finding_id":"P0-1"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-x","finding_id":"p0-1"}' "interspect-correction"
 
 ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE low_confidence=1 AND corroborated_at > 0;")
 assert_eq "both rows corroborated after 2nd independent flag" "$ROWS" "2"
@@ -135,9 +135,9 @@ echo "=== M5.ii: same session flagging twice does NOT corroborate ==="
 
 sqlite3 "$DB" "DELETE FROM evidence;"
 _interspect_insert_evidence "sess-same" "fd-quality" "override" "agent_wrong" \
-    '{"low_confidence":true,"review_id":"run-same","finding_id":"P0-1"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-same","finding_id":"p0-1"}' "interspect-correction"
 _interspect_insert_evidence "sess-same" "fd-quality" "override" "agent_wrong" \
-    '{"low_confidence":true,"review_id":"run-same","finding_id":"P0-1"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-same","finding_id":"p0-1"}' "interspect-correction"
 ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE low_confidence=1 AND corroborated_at > 0;")
 assert_eq "same session flagging the same finding twice: still 0 corroborated" "$ROWS" "0"
 
@@ -146,20 +146,20 @@ echo "=== M1 regression: cross-run finding_id collision does NOT corroborate ===
 
 sqlite3 "$DB" "DELETE FROM evidence;"
 _interspect_insert_evidence "sess-run1" "fd-arch" "override" "agent_wrong" \
-    '{"low_confidence":true,"review_id":"run-1","finding_id":"P0-1"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-1","finding_id":"p0-1"}' "interspect-correction"
 _interspect_insert_evidence "sess-run2" "fd-arch" "override" "agent_wrong" \
-    '{"low_confidence":true,"review_id":"run-2","finding_id":"P0-1"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-2","finding_id":"p0-1"}' "interspect-correction"
 ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE low_confidence=1 AND corroborated_at > 0;")
-assert_eq "different runs' same positional P0-1: 0 corroborated (namespaced key)" "$ROWS" "0"
+assert_eq "different runs' same positional p0-1: 0 corroborated (namespaced key)" "$ROWS" "0"
 
 echo ""
 echo "=== M2 regression: disagreeing override_reason does NOT corroborate ==="
 
 sqlite3 "$DB" "DELETE FROM evidence;"
 _interspect_insert_evidence "sess-r1" "fd-people" "override" "agent_wrong" \
-    '{"low_confidence":true,"review_id":"run-m2","finding_id":"P1-3"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-m2","finding_id":"p1-3"}' "interspect-correction"
 _interspect_insert_evidence "sess-r2" "fd-people" "override" "deprioritized" \
-    '{"low_confidence":true,"review_id":"run-m2","finding_id":"P1-3"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-m2","finding_id":"p1-3"}' "interspect-correction"
 ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE low_confidence=1 AND corroborated_at > 0;")
 assert_eq "agent_wrong then deprioritized on same finding: 0 corroborated (reason mismatch)" "$ROWS" "0"
 STILL_GATED=$(sqlite3 "$DB" "SELECT quarantine_until FROM evidence WHERE session_id='sess-r1';")
@@ -172,31 +172,31 @@ sqlite3 "$DB" "DELETE FROM evidence;"
 LONG_DESC=$(printf 'x%.0s' {1..600})
 # Row with a >500-char description (gets truncated/mangled by _interspect_sanitize)
 _interspect_insert_evidence "sess-long" "fd-quality" "override" "agent_wrong" \
-    "{\"low_confidence\":true,\"review_id\":\"run-m3\",\"finding_id\":\"P0-9\",\"description\":\"${LONG_DESC}\"}" "interspect-correction"
+    "{\"low_confidence\":true,\"review_id\":\"run-m3\",\"finding_id\":\"p0-9\",\"description\":\"${LONG_DESC}\"}" "interspect-correction"
 # A second, unrelated flagged+gated finding that should corroborate normally
 _interspect_insert_evidence "sess-other-a" "fd-quality" "override" "agent_wrong" \
-    '{"low_confidence":true,"review_id":"run-m3","finding_id":"P0-8"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-m3","finding_id":"p0-8"}' "interspect-correction"
 _interspect_insert_evidence "sess-other-b" "fd-quality" "override" "agent_wrong" \
-    '{"low_confidence":true,"review_id":"run-m3","finding_id":"P0-8"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-m3","finding_id":"p0-8"}' "interspect-correction"
 ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE low_confidence=1 AND corroborated_at > 0;")
-assert_eq "P0-8 pair corroborates despite P0-9's oversized context (finding_key isn't json_extract)" "$ROWS" "2"
-LONG_ROW_KEY=$(sqlite3 "$DB" "SELECT finding_key FROM evidence WHERE session_id='sess-long';")
-assert_eq "oversized-context row still got a clean finding_key (read pre-sanitize)" "$LONG_ROW_KEY" "run-m3:P0-9"
+assert_eq "p0-8 pair corroborates despite p0-9's oversized context (finding_key isn't json_extract)" "$ROWS" "2"
+LONG_ROW_KEY=$(sqlite3 "$DB" "SELECT gate_key FROM evidence WHERE session_id='sess-long';")
+assert_eq "oversized-context row still got a clean finding_key (read pre-sanitize)" "$LONG_ROW_KEY" '["v2","review","run-m3","p0-9"]'
 
 echo ""
 echo "=== _interspect_corroborate_evidence: explicit corroboration ==="
 
 sqlite3 "$DB" "DELETE FROM evidence;"
 _interspect_insert_evidence "sess-3" "fd-correctness" "override" "agent_wrong" \
-    '{"low_confidence":true,"review_id":"run-y","finding_id":"P1-9"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-y","finding_id":"p1-9"}' "interspect-correction"
 GATED_BEFORE=$(sqlite3 "$DB" "SELECT quarantine_until FROM evidence WHERE session_id='sess-3';")
 assert_eq "explicit-corroborate test: starts gated" "$GATED_BEFORE" "$_INTERSPECT_LOW_CONFIDENCE_SENTINEL"
 
 # The flagging session itself may not self-corroborate (N3).
-SELF_AFFECTED=$(_interspect_corroborate_evidence "fd-correctness" "run-y" "P1-9" "sess-3")
+SELF_AFFECTED=$(_interspect_corroborate_evidence "fd-correctness" "run-y" "p1-9" "sess-3" "agent_wrong")
 assert_eq "self-corroboration (same session) is refused" "$SELF_AFFECTED" "0"
 
-AFFECTED=$(_interspect_corroborate_evidence "fd-correctness" "run-y" "P1-9" "sess-reviewer")
+AFFECTED=$(_interspect_corroborate_evidence "fd-correctness" "run-y" "p1-9" "sess-reviewer" "agent_wrong")
 assert_eq "_interspect_corroborate_evidence reports 1 row lifted by a different actor" "$AFFECTED" "1"
 
 GATED_AFTER=$(sqlite3 "$DB" "SELECT quarantine_until, corroborated_at > 0 FROM evidence WHERE session_id='sess-3';")
@@ -207,21 +207,21 @@ echo "=== Gate stats (Option B decision data) ==="
 
 sqlite3 "$DB" "DELETE FROM evidence;"
 _interspect_insert_evidence "sess-a" "fd-safety" "override" "agent_wrong" \
-    '{"low_confidence":true,"review_id":"run-z","finding_id":"P0-a"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-z","finding_id":"p0-a"}' "interspect-correction"
 _interspect_insert_evidence "sess-b" "fd-safety" "override" "agent_wrong" \
-    '{"low_confidence":true,"review_id":"run-z","finding_id":"P0-b"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-z","finding_id":"p0-b"}' "interspect-correction"
 _interspect_insert_evidence "sess-c" "fd-safety" "override" "agent_wrong" \
-    '{"low_confidence":true,"review_id":"run-z","finding_id":"P0-b"}' "interspect-correction"
+    '{"low_confidence":true,"review_id":"run-z","finding_id":"p0-b"}' "interspect-correction"
 
 STATS=$(_interspect_low_confidence_gate_stats)
-assert_eq "3 flagged, 2 corroborated (P0-b pair), 1 still gated (P0-a)" "$STATS" "3|2|1"
+assert_eq "3 flagged, 2 corroborated (p0-b pair), 1 still gated (p0-a)" "$STATS" "3|2|1|0"
 
 echo ""
 echo "=== Gate stats on an empty DB (N1: no bare '0||') ==="
 
 sqlite3 "$DB" "DELETE FROM evidence;"
 STATS=$(_interspect_low_confidence_gate_stats)
-assert_eq "empty DB: 0 flagged, 0 corroborated, 0 still gated" "$STATS" "0|0|0"
+assert_eq "empty DB: 0 flagged, 0 corroborated, 0 still gated" "$STATS" "0|0|0|0"
 
 echo ""
 echo "=== Round-2 M1: rerun of the same target must not share a review_id ==="
@@ -255,9 +255,9 @@ assert_eq "M1: rerun 2 (same output-dir basename) gets a DIFFERENT review_id" \
 
 sqlite3 "$DB" "DELETE FROM evidence;"
 _interspect_insert_evidence "sess-rerun1" "fd-m1" "override" "agent_wrong" \
-    "{\"low_confidence\":true,\"review_id\":\"$RID1\",\"finding_id\":\"P0-1\"}" "interspect-correction"
+    "{\"low_confidence\":true,\"review_id\":\"$RID1\",\"finding_id\":\"p0-1\"}" "interspect-correction"
 _interspect_insert_evidence "sess-rerun2" "fd-m1" "override" "agent_wrong" \
-    "{\"low_confidence\":true,\"review_id\":\"$RID2\",\"finding_id\":\"P0-1\"}" "interspect-correction"
+    "{\"low_confidence\":true,\"review_id\":\"$RID2\",\"finding_id\":\"p0-1\"}" "interspect-correction"
 ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE low_confidence=1 AND corroborated_at > 0;")
 assert_eq "M1: two reruns of the same target (same basename, different synthesis_timestamp) do NOT corroborate" "$ROWS" "0"
 
@@ -274,7 +274,7 @@ sqlite3 "$DB" "DELETE FROM evidence;"
 
 EVENT_JSON=$(jq -n '{
     id: "evt-m4-1",
-    finding_id: "P1-4",
+    finding_id: "p1-4",
     resolution: "accepted",
     chosen_severity: "P0",
     impact: "severity_overridden",
@@ -299,7 +299,7 @@ assert_contains "M4: single-session severity_miscalibrated evidence does NOT dri
 # resolution on the "same" finding_id must NOT auto-corroborate the first.
 EVENT_JSON_2=$(jq -n '{
     id: "evt-m4-2",
-    finding_id: "P1-4",
+    finding_id: "p1-4",
     resolution: "accepted",
     chosen_severity: "P0",
     impact: "severity_overridden",
@@ -318,7 +318,7 @@ assert_eq "M4: without a producer-supplied review_run_id, a second resolution do
 sqlite3 "$DB" "DELETE FROM evidence;"
 EVENT_JSON_3=$(jq -n '{
     id: "evt-m4-3",
-    finding_id: "P1-9",
+    finding_id: "p1-9",
     resolution: "accepted",
     chosen_severity: "P0",
     impact: "severity_overridden",
@@ -329,7 +329,7 @@ EVENT_JSON_3=$(jq -n '{
 }')
 EVENT_JSON_4=$(jq -n '{
     id: "evt-m4-4",
-    finding_id: "P1-9",
+    finding_id: "p1-9",
     resolution: "accepted",
     chosen_severity: "P0",
     impact: "severity_overridden",
@@ -342,6 +342,158 @@ _interspect_process_disagreement_event "$EVENT_JSON_3" 2>/dev/null || true
 _interspect_process_disagreement_event "$EVENT_JSON_4" 2>/dev/null || true
 ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source='fd-safety' AND override_reason='severity_miscalibrated' AND low_confidence=1 AND corroborated_at > 0;")
 assert_eq "M4: with a producer-supplied review_run_id, two independent resolutions on the same finding DO corroborate" "$ROWS" "2"
+
+echo ""
+echo "=== Bypass attempts: run identity, actor, unscoped rows ==="
+
+# P1: no synthesis_timestamp -> no run identity (no basename fallback).
+NOTS_DIR="$TEST_DIR/flux-drive-nots"
+mkdir -p "$NOTS_DIR"
+echo '{"findings": []}' > "$NOTS_DIR/findings.json"
+RID_NOTS=$(_interspect_review_id_from_findings "$NOTS_DIR/findings.json") && NOTS_RC=0 || NOTS_RC=$?
+assert_eq "P1: findings.json without synthesis_timestamp yields no review_id" "$RID_NOTS" ""
+assert_eq "P1: ...and the helper reports failure" "$NOTS_RC" "1"
+RID_MISSING=$(_interspect_review_id_from_findings "$NOTS_DIR/absent.json") && MISSING_RC=0 || MISSING_RC=$?
+assert_eq "P1: unreadable findings.json yields no review_id (rc 1)" "$RID_MISSING|$MISSING_RC" "|1"
+
+# P2a: omitted or empty corroborating actor is refused and lifts nothing.
+sqlite3 "$DB" "DELETE FROM evidence;"
+_interspect_insert_evidence "sess-orig" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"run-b","finding_id":"p0-1"}' "interspect-correction"
+OUT=$(_interspect_corroborate_evidence "fd-bypass" "run-b" "p0-1" "" "agent_wrong") && RC=0 || RC=$?
+assert_eq "P2: omitted corroborating actor is refused (rc 1, no output)" "$RC|$OUT" "1|"
+OUT=$(_interspect_corroborate_evidence "fd-bypass" "run-b" "p0-1" "" "agent_wrong") && RC=0 || RC=$?
+assert_eq "P2: empty corroborating actor is refused (rc 1, no output)" "$RC|$OUT" "1|"
+STILL=$(sqlite3 "$DB" "SELECT low_confidence, corroborated_at FROM evidence WHERE session_id='sess-orig';")
+assert_eq "P2: refused calls leave the gate in place" "$STILL" "1|0"
+
+# P2b: a gated row with no review_id is bound to its own session and can be
+# lifted explicitly, but never by a second correction and never by itself.
+sqlite3 "$DB" "DELETE FROM evidence;"
+_interspect_insert_evidence "sess-u1" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"finding_id":"p0-7"}' "interspect-correction"
+KEY=$(sqlite3 "$DB" "SELECT gate_key FROM evidence WHERE session_id='sess-u1';")
+assert_eq "P2: unscoped gated row gets a session-bound finding_key" "$KEY" '["v2","session","sess-u1","p0-7"]'
+_interspect_insert_evidence "sess-u2" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"finding_id":"p0-7"}' "interspect-correction"
+ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE corroborated_at > 0;")
+assert_eq "P2: a second unscoped correction does NOT corroborate" "$ROWS" "0"
+AFFECTED=$(_interspect_corroborate_evidence "fd-bypass" "sess-u1" "p0-7" "sess-u1" "agent_wrong" session)
+assert_eq "P2: the original session cannot lift its own unscoped row" "$AFFECTED" "0"
+AFFECTED=$(_interspect_corroborate_evidence "fd-bypass" "sess-u1" "p0-7" "sess-judge" "agent_wrong" session)
+assert_eq "P2: a different named session lifts the unscoped row" "$AFFECTED" "1"
+LEFT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE session_id='sess-u2' AND corroborated_at > 0;")
+assert_eq "P2: the other session's unscoped row stays gated" "$LEFT" "0"
+
+# Automatic corroboration needs a real session id on both sides.
+sqlite3 "$DB" "DELETE FROM evidence;"
+_interspect_insert_evidence "" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"run-e","finding_id":"p0-1"}' "interspect-correction"
+_interspect_insert_evidence "sess-real" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"run-e","finding_id":"p0-1"}' "interspect-correction"
+ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE corroborated_at > 0;")
+assert_eq "empty session first, then named: 0 corroborated" "$ROWS" "0"
+sqlite3 "$DB" "DELETE FROM evidence;"
+_interspect_insert_evidence "sess-real" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"run-e","finding_id":"p0-1"}' "interspect-correction"
+_interspect_insert_evidence "" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"run-e","finding_id":"p0-1"}' "interspect-correction"
+ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE corroborated_at > 0;")
+assert_eq "named session first, then empty: 0 corroborated" "$ROWS" "0"
+
+# Round 4: disagreement events with an absent/null session_id must not become
+# a corroborating "unknown" actor, and explicit corroboration is per-reason.
+sqlite3 "$DB" "DELETE FROM evidence;"
+EV_NOSESS='{"id":"e1","finding_id":"p0-9","resolution":"accepted","chosen_severity":"P0","impact":"severity_overridden","agents_json":"{\"fd-r4\":\"P2\"}","review_run_id":"run-r4"}'
+EV_NULLSESS='{"id":"e2","session_id":null,"finding_id":"p0-9","resolution":"accepted","chosen_severity":"P0","impact":"severity_overridden","agents_json":"{\"fd-r4\":\"P2\"}","review_run_id":"run-r4"}'
+_interspect_process_disagreement_event "$EV_NOSESS"
+_interspect_process_disagreement_event "$EV_NULLSESS"
+R4=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE session_id='unknown';")
+assert_eq "R4: absent/null session_id is never stored as 'unknown'" "$R4" "0"
+R4=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE corroborated_at > 0;")
+assert_eq "R4: two sessionless disagreement events do not corroborate" "$R4" "0"
+
+sqlite3 "$DB" "DELETE FROM evidence;"
+_interspect_insert_evidence "sess-m1" "fd-r4" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"run-m","finding_id":"p0-3"}' "interspect-correction"
+_interspect_insert_evidence "sess-m2" "fd-r4" "override" "deprioritized" \
+    '{"low_confidence":true,"review_id":"run-m","finding_id":"p0-3"}' "interspect-correction"
+R4=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE corroborated_at > 0;")
+assert_eq "R4: different override_reason does not auto-corroborate" "$R4" "0"
+OUT=$(_interspect_corroborate_evidence "fd-r4" "run-m" "p0-3" "sess-judge") && RC=0 || RC=$?
+assert_eq "R4: explicit corroboration without a reason is refused" "$RC|$OUT" "1|"
+AFFECTED=$(_interspect_corroborate_evidence "fd-r4" "run-m" "p0-3" "sess-judge" "agent_wrong")
+assert_eq "R4: explicit corroboration lifts only the named reason" "$AFFECTED" "1"
+LEFT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE override_reason='deprioritized' AND corroborated_at > 0;")
+assert_eq "R4: the differently-reasoned row stays gated" "$LEFT" "0"
+
+# Migration: rows without a stored legacy key cannot prove context agreement and remain held.
+BF_PROJECT_DIR="$TEST_DIR/bf-project"
+mkdir -p "$BF_PROJECT_DIR/.clavain/interspect"
+BF_DB="$BF_PROJECT_DIR/.clavain/interspect/interspect.db"
+sqlite3 "$BF_DB" "
+    CREATE TABLE evidence (
+        id INTEGER PRIMARY KEY, ts TEXT, session_id TEXT, seq INTEGER, source TEXT, source_version TEXT,
+        event TEXT, override_reason TEXT, context TEXT, project TEXT,
+        project_lang TEXT, project_type TEXT,
+        quarantine_until INTEGER DEFAULT 0, low_confidence INTEGER DEFAULT 0, corroborated_at INTEGER DEFAULT 0
+    );
+    INSERT INTO evidence (ts, session_id, seq, source, event, override_reason, context, project, quarantine_until, low_confidence)
+    VALUES ('2026-01-01T00:00:00Z', 'bf-1', 1, 'fd-bf', 'override', 'agent_wrong', '{\"review_id\":\"run-bf\",\"finding_id\":\"p0-1\",\"low_confidence\":true}', 'test', $_INTERSPECT_LOW_CONFIDENCE_SENTINEL, 1);
+    INSERT INTO evidence (ts, session_id, seq, source, event, override_reason, context, project, quarantine_until, low_confidence)
+    VALUES ('2026-01-01T00:00:01Z', 'bf-2', 2, 'fd-bf', 'override', 'agent_wrong', '{\"finding_id\":\"p0-2\",\"low_confidence\":true}', 'test', $_INTERSPECT_LOW_CONFIDENCE_SENTINEL, 1);
+    INSERT INTO evidence (ts, session_id, seq, source, event, override_reason, context, project, quarantine_until, low_confidence)
+    VALUES ('2026-01-01T00:00:02Z', 'bf-3', 3, 'fd-bf', 'override', 'agent_wrong', '{truncated', 'test', $_INTERSPECT_LOW_CONFIDENCE_SENTINEL, 1);
+"
+_SAVED_DB="${_INTERSPECT_DB:-}"
+CLAUDE_PROJECT_DIR="$BF_PROJECT_DIR" _interspect_ensure_db
+BF_KEYS=$(sqlite3 "$BF_DB" "SELECT COALESCE(finding_key,'NULL') FROM evidence ORDER BY seq;")
+assert_eq "migration holds rows without trustworthy legacy keys" "$BF_KEYS" "NULL
+NULL
+NULL"
+BF_AFFECTED=$(_interspect_corroborate_evidence "fd-bf" "run-bf" "p0-1" "sess-judge" "agent_wrong")
+_INTERSPECT_DB="$_SAVED_DB"
+assert_eq "legacy row lacking key proof cannot be explicitly corroborated" "$BF_AFFECTED" "0"
+
+echo ""
+echo "=== Control-bearing explicit actors are rejected without lifting ==="
+
+for ACTOR_CASE in newline escape appended-newline appended-escape; do
+    case "$ACTOR_CASE" in
+        newline) ACTOR=$'\n' ;;
+        escape) ACTOR=$'\033' ;;
+        appended-newline) ACTOR=$'sess-reviewer\n' ;;
+        appended-escape) ACTOR=$'sess-reviewer\033' ;;
+    esac
+    sqlite3 "$DB" "DELETE FROM evidence;"
+    _interspect_insert_evidence "sess-original" "fd-controls" "override" "agent_wrong" \
+        '{"low_confidence":true,"review_id":"run-controls","finding_id":"p0-1"}' "interspect-correction"
+    BEFORE=$(sqlite3 "$DB" "SELECT quarantine_until, corroborated_at FROM evidence WHERE session_id='sess-original';")
+    assert_eq "$ACTOR_CASE: named original starts held" "$BEFORE" "${_INTERSPECT_LOW_CONFIDENCE_SENTINEL}|0"
+    OUT=$(_interspect_corroborate_evidence "fd-controls" "run-controls" "p0-1" "$ACTOR" "agent_wrong") && RC=0 || RC=$?
+    assert_eq "$ACTOR_CASE: invalid actor returns failure without stdout" "$RC|$OUT" "1|"
+    AFTER=$(sqlite3 "$DB" "SELECT quarantine_until, corroborated_at FROM evidence WHERE session_id='sess-original';")
+    assert_eq "$ACTOR_CASE: quarantine and timestamp unchanged" "$AFTER" "$BEFORE"
+done
+
+echo ""
+echo "=== Colon-separated identity components must not collide ==="
+
+sqlite3 "$DB" "DELETE FROM evidence;"
+_interspect_insert_evidence "sess-colon-a" "fd-collision" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"a:b","finding_id":"c"}' "interspect-correction"
+_interspect_insert_evidence "sess-colon-b" "fd-collision" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"a","finding_id":"b:c"}' "interspect-correction"
+ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE quarantine_until = ${_INTERSPECT_LOW_CONFIDENCE_SENTINEL} AND corroborated_at = 0;")
+assert_eq "distinct review/finding tuples remain held despite legacy colon collision" "$ROWS" "2"
+
+sqlite3 "$DB" "DELETE FROM evidence;"
+_interspect_insert_evidence "sess-a" "fd-collision" "override" "agent_wrong" \
+    '{"low_confidence":true,"finding_id":"f"}' "interspect-correction"
+_interspect_insert_evidence "sess-b" "fd-collision" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"unscoped","finding_id":"sess-a:f"}' "interspect-correction"
+ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE quarantine_until = ${_INTERSPECT_LOW_CONFIDENCE_SENTINEL} AND corroborated_at = 0;")
+assert_eq "real review named unscoped cannot corroborate a session-scoped row" "$ROWS" "2"
 
 echo ""
 echo "=== Existing (non-flagged) behaviour is unchanged ==="

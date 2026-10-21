@@ -23,9 +23,17 @@ if [[ -z "$INTERSPECT_LIB" || ! -f "$INTERSPECT_LIB" ]]; then
     exit 1
 fi
 source "$INTERSPECT_LIB"
-_interspect_ensure_db
+# Initialization (including the gate migration) must succeed before any
+# decision read or canary evaluation: a failed migration leaves prior exposed
+# evidence and aggregates in place.
+if ! _interspect_ensure_db; then
+    echo "Error: Interspect initialization failed (gate migration or database error); stopping before any evidence is read." >&2
+    exit 1
+fi
 DB=$(_interspect_db_path)
 ```
+
+**If this block exits non-zero, stop here.** Do not run any later block or evaluate canaries; report the error above to the user.
 
 ## Detect Routing-Eligible Patterns
 
@@ -88,7 +96,7 @@ If "Show evidence details" is selected, query evidence for each eligible agent:
 ```bash
 local escaped
 escaped=$(_interspect_sql_escape "$agent")
-sqlite3 -separator '|' "$DB" "SELECT ts, override_reason, substr(context, 1, 200) FROM evidence WHERE source = '${escaped}' AND event = 'override' ORDER BY ts DESC LIMIT 5;"
+sqlite3 -separator '|' "$DB" "SELECT ts, override_reason, substr(context, 1, 200) FROM evidence WHERE source = '${escaped}' AND event = 'override' AND $(_interspect_eligible_sql) ORDER BY ts DESC LIMIT 5;"
 ```
 
 Format as human-readable summaries:
@@ -166,8 +174,8 @@ For each overlay-eligible pattern, draft the tuning instruction:
 ```bash
 local escaped
 escaped=$(_interspect_sql_escape "$agent")
-CONTEXTS=$(sqlite3 "$DB" "SELECT context FROM evidence WHERE source = '${escaped}' AND event = 'override' AND override_reason = 'agent_wrong' ORDER BY ts DESC LIMIT 10;")
-EVIDENCE_IDS=$(sqlite3 "$DB" "SELECT id FROM evidence WHERE source = '${escaped}' AND event = 'override' AND override_reason = 'agent_wrong' ORDER BY ts DESC LIMIT 10;")
+CONTEXTS=$(sqlite3 "$DB" "SELECT context FROM evidence WHERE source = '${escaped}' AND event = 'override' AND $(_interspect_eligible_sql) AND override_reason = 'agent_wrong' ORDER BY ts DESC LIMIT 10;")
+EVIDENCE_IDS=$(sqlite3 "$DB" "SELECT id FROM evidence WHERE source = '${escaped}' AND event = 'override' AND $(_interspect_eligible_sql) AND override_reason = 'agent_wrong' ORDER BY ts DESC LIMIT 10;")
 ```
 
 2. Summarize the pattern: analyze what the agent gets wrong and in what contexts

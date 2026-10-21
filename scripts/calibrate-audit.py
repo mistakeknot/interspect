@@ -38,6 +38,10 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Also support the existing file-based module loader used by snapshot consumers.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from interspect_gate import eligible_sql, skill_signal_eligible_sql
+
 
 def find_repo_root(start: Path) -> Path:
     p = start.resolve()
@@ -165,13 +169,13 @@ def compute_consensus_trend_point(
 
         # --- agreement_rate ---
         cur.execute(
-            """
+            f"""
             SELECT
                 COUNT(*) AS total,
                 SUM(CASE WHEN override_reason IS NOT NULL
                          AND override_reason != '' THEN 1 ELSE 0 END) AS overridden
             FROM evidence
-            WHERE source_kind = 'agent' AND ts >= ?
+            WHERE source_kind = 'agent' AND ts >= ? AND {eligible_sql()}
             """,
             (cutoff,),
         )
@@ -183,16 +187,16 @@ def compute_consensus_trend_point(
 
         # --- output_diversity ---
         cur.execute(
-            "SELECT COUNT(DISTINCT source) FROM evidence WHERE ts >= ?",
+            f"SELECT COUNT(DISTINCT source) FROM evidence WHERE ts >= ? AND {eligible_sql()}",
             (cutoff,),
         )
         total_distinct_sources = cur.fetchone()[0] or 0
 
         cur.execute(
-            """
+            f"""
             SELECT session_id, COUNT(DISTINCT source) AS n_sources
             FROM evidence
-            WHERE ts >= ?
+            WHERE ts >= ? AND {eligible_sql()}
             GROUP BY session_id
             """,
             (cutoff,),
@@ -211,10 +215,11 @@ def compute_consensus_trend_point(
         defect_escape_rate = None
         if has_skill_signals:
             cur.execute(
-                """
-                SELECT AVG(value) AS avg_value, COUNT(*) AS n
-                FROM skill_signals
-                WHERE signal_kind = 'error' AND observed_at >= ?
+                f"""
+                SELECT AVG(s.value) AS avg_value, COUNT(*) AS n
+                FROM skill_signals s
+                WHERE s.signal_kind = 'error' AND s.observed_at >= ?
+                  AND {skill_signal_eligible_sql('s')}
                 """,
                 (cutoff,),
             )
@@ -223,7 +228,7 @@ def compute_consensus_trend_point(
                 defect_escape_rate = 1.0 - row["avg_value"]
 
         # --- evidence_n: total evidence rows in window (denominator context) ---
-        cur.execute("SELECT COUNT(*) FROM evidence WHERE ts >= ?", (cutoff,))
+        cur.execute(f"SELECT COUNT(*) FROM evidence WHERE ts >= ? AND {eligible_sql()}", (cutoff,))
         evidence_n = cur.fetchone()[0] or 0
 
     except sqlite3.Error:

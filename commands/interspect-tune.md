@@ -27,9 +27,17 @@ if [[ -z "$INTERSPECT_LIB" || ! -f "$INTERSPECT_LIB" ]]; then
     exit 1
 fi
 source "$INTERSPECT_LIB"
-_interspect_ensure_db
+# Initialization (including the gate migration) must succeed before any
+# decision read or canary evaluation: a failed migration leaves prior exposed
+# evidence and aggregates in place.
+if ! _interspect_ensure_db; then
+    echo "Error: Interspect initialization failed (gate migration or database error); stopping before any evidence is read." >&2
+    exit 1
+fi
 DB=$(_interspect_db_path)
 ```
+
+**If this block exits non-zero, stop here.** Do not run any later block or evaluate canaries; report the error above to the user.
 
 ## Parse Target
 
@@ -52,7 +60,9 @@ Determine `KIND`:
 ### Agent mode (KIND=agent)
 
 ```bash
-CORRECTION_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE (source = '$TARGET' OR source LIKE '%$TARGET') AND source_kind = 'agent' AND event = 'override';" 2>/dev/null || echo "0")
+[[ "$TARGET" =~ ^fd-[a-z][a-z0-9-]*$ ]] || { echo "Invalid agent name"; exit 1; }
+ESCAPED_TARGET=$(_interspect_sql_escape "$TARGET")
+CORRECTION_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE (COALESCE(gate_source, source) = '$ESCAPED_TARGET' OR source LIKE '%$ESCAPED_TARGET') AND source_kind = 'agent' AND event = 'override' AND $(_interspect_eligible_sql);" 2>/dev/null || echo "0")
 ```
 If 0: "No corrections found for agent $TARGET. Run `/interspect:interspect-correction $TARGET` first."
 Check `.clavain/interspect/overlays/$TARGET/tuning.md`; if it exists, ask "Regenerate?".
@@ -60,7 +70,8 @@ Check `.clavain/interspect/overlays/$TARGET/tuning.md`; if it exists, ask "Regen
 ### Tool mode (KIND=tool)
 
 ```bash
-PATTERN_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source = '$TARGET' AND source_kind = 'tool';" 2>/dev/null || echo "0")
+_interspect_validate_tool_source "$TARGET" || exit 1
+PATTERN_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE source = '$(_interspect_sql_escape "$TARGET")' AND source_kind = 'tool' AND $(_interspect_eligible_sql);" 2>/dev/null || echo "0")
 ```
 If 0: "No tool-pattern evidence found for $TARGET."
 
@@ -68,7 +79,7 @@ If 0: "No tool-pattern evidence found for $TARGET."
 
 ```bash
 _interspect_validate_skill_name "$TARGET" || { echo "Invalid skill name"; exit 1; }
-SIGNAL_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM skill_signals WHERE skill_name = '$TARGET';" 2>/dev/null || echo "0")
+SIGNAL_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM skill_signals s WHERE skill_name = '$TARGET' AND $(_interspect_skill_signal_eligible_sql s);" 2>/dev/null || echo "0")
 INVS=$(_interspect_skill_invocation_count "$TARGET")
 HAS_GOALS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM skill_goals WHERE skill_name = '$TARGET';" 2>/dev/null || echo "0")
 ```

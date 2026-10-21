@@ -28,6 +28,7 @@ trap cleanup EXIT
 PLUGIN="$TEST_DIR/plugin"
 mkdir -p "$PLUGIN/hooks" "$PLUGIN/scripts/signals"
 cp "$SRC_DIR/hooks/"*.sh "$PLUGIN/hooks/"
+cp "$SRC_DIR/scripts/interspect_gate.py" "$PLUGIN/scripts/"
 # Stub collectors: log name + nice value, then wait for the release file.
 for c in collect_bead_close collect_no_redirect collect_tokens; do
     cat > "$PLUGIN/scripts/signals/$c.py" <<PY

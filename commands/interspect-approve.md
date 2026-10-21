@@ -23,9 +23,17 @@ if [[ -z "$INTERSPECT_LIB" || ! -f "$INTERSPECT_LIB" ]]; then
     exit 1
 fi
 source "$INTERSPECT_LIB"
-_interspect_ensure_db
+# Initialization (including the gate migration) must succeed before any
+# decision read or canary evaluation: a failed migration leaves prior exposed
+# evidence and aggregates in place.
+if ! _interspect_ensure_db; then
+    echo "Error: Interspect initialization failed (gate migration or database error); stopping before any evidence is read." >&2
+    exit 1
+fi
 DB=$(_interspect_db_path)
 ```
+
+**If this block exits non-zero, stop here.** Do not run any later block or evaluate canaries; report the error above to the user.
 
 ## Read Pending Proposals
 
@@ -79,7 +87,7 @@ If "Show evidence" is selected, for each proposed agent:
 ```bash
 local escaped
 escaped=$(_interspect_sql_escape "$agent")
-sqlite3 -separator '|' "$DB" "SELECT ts, override_reason, substr(context, 1, 200) FROM evidence WHERE source = '${escaped}' AND event = 'override' ORDER BY ts DESC LIMIT 5;"
+sqlite3 -separator '|' "$DB" "SELECT ts, override_reason, substr(context, 1, 200) FROM evidence WHERE source = '${escaped}' AND event = 'override' AND $(_interspect_eligible_sql) ORDER BY ts DESC LIMIT 5;"
 ```
 
 Format as human-readable summaries, then re-present the multi-select.

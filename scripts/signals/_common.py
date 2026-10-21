@@ -23,6 +23,9 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from interspect_gate import eligible_sql
+
 
 # ─── Repo-root / DB discovery (mirrors ingest-skill-audit.py) ────────────────
 
@@ -67,6 +70,7 @@ def pending_evidence(
         "SELECT e.source_event_id, e.session_id, e.source, e.ts, e.project "
         "FROM evidence e "
         "WHERE e.source_kind = 'skill' "
+        f"  AND {eligible_sql('e')} "
         "  AND e.event = 'skill_invocation' "
         "  AND e.source_event_id IS NOT NULL "
         "  AND NOT EXISTS ("

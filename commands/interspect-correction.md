@@ -42,63 +42,83 @@ fi
 source "$INTERSPECT_LIB"
 ```
 
-## Low-Confidence Finding Lookup (optional, best-effort)
+## Finding Lookup and Recording
 
-If the description references a flux-drive finding ID (e.g. `P0-3`) and a `findings.json` from that run is known, check whether the finding carries the severity-tier confidence gate (`docs/spec/core/synthesis.md` Step 4a in interflux).
+Use a canonical lowercase `fd-*` agent name. Session identifiers are ASCII and
+case-insensitive; review and finding IDs preserve ASCII case and match
+exactly (including `P0-1` and ISO timestamp review IDs). Never lowercase them.
+Names and identities are
+asserted by the caller, not authenticated.
 
-`FINDINGS_JSON` is the newest `findings.json` under the flux-drive output directory for the current project (e.g. `find . -path '*/flux-drive/*/findings.json' -newer <marker> 2>/dev/null | sort | tail -1`, or whatever the caller already has in scope from the run that produced this finding). `REVIEW_ID` identifies that specific *run* — it namespaces `FINDING_ID` so two different runs' `P0-1` are never treated as the same finding (flux-drive IDs are positional per run and otherwise collide across runs). The output directory's basename alone is NOT enough: flux-drive deliberately keeps that basename stable across reruns of the same target, so two reruns would otherwise collide. `_interspect_review_id_from_findings` (defined by the library sourced above) appends the run's `synthesis_timestamp` to the basename so reruns never share a `REVIEW_ID` (round-2 M1):
+When a correction references a finding, require its exact `findings.json` from
+that run. Do not select the newest unrelated file. Python validates the original
+JSON, including duplicate keys and boolean types, before extraction. A missing
+file, failed lookup, ambiguous match or invalid classification is an error;
+never assume `low_confidence=false` after a lookup failure. A correction without
+any finding reference retains ordinary evidence behavior only when it is not
+flagged low-confidence. Preserve an explicit `low_confidence=true` from the
+correction input in `LOW_CONFIDENCE`; a flagged correction without a valid
+finding reference is refused, never retried without that flag.
 
 ```bash
-FINDING_ID=""   # e.g. "P0-3", parsed from the description if present
-REVIEW_ID=""    # per-run id: <output-dir basename>@<synthesis_timestamp>
-LOW_CONFIDENCE="false"
-if [[ -n "$FINDING_ID" && -f "$FINDINGS_JSON" ]] && command -v jq &>/dev/null; then
-    LOW_CONFIDENCE=$(jq -r --arg id "$FINDING_ID" \
-        '(.findings[] | select(.id == $id) | .low_confidence) // false' \
-        "$FINDINGS_JSON" 2>/dev/null) || LOW_CONFIDENCE="false"
-    [[ -z "$REVIEW_ID" ]] && REVIEW_ID="$(_interspect_review_id_from_findings "$FINDINGS_JSON")"
+_interspect_ensure_db || exit 1
+# Check the sanitizer's status before constructing another command substitution.
+SANITIZED_DESCRIPTION=$(_interspect_sanitize "$DESCRIPTION") || {
+    echo "Correction not recorded: description rejected by sanitizer." >&2
+    exit 1
+}
+# FINDING_ID is empty for an ordinary correction without a finding reference.
+REQUEST=$(python3 - "$SANITIZED_DESCRIPTION" "${FINDING_ID:-}" "${FINDINGS_JSON:-}" "${LOW_CONFIDENCE:-false}" <<'PY'
+import json, sys
+print(json.dumps(dict(description=sys.argv[1], finding_id=sys.argv[2],
+                     findings_path=sys.argv[3], low_confidence=json.loads(sys.argv[4]))))
+PY
+) || exit 1
+CONTEXT=$(printf '%s' "$REQUEST" | python3 "$_INTERSPECT_GATE_MODULE" correction-context) || {
+    echo "Correction not recorded: finding lookup or identity validation failed." >&2
+    exit 1
+}
+_interspect_insert_evidence \
+    "${CLAUDE_SESSION_ID:-}" "$AGENT_NAME" override "$OVERRIDE_REASON" \
+    "$CONTEXT" interspect-correction || {
+    echo "Correction not recorded: validation, migration or database write failed." >&2
+    exit 1
+}
+```
+
+Low-confidence rows use a SQL JSON-array key containing version, scope, scope ID
+and finding ID. Colons in individual components cannot collide. Matching also
+requires canonical source and reason, plus distinct canonical session IDs.
+Diagnostic context is redacted separately and is never used to lift a gate.
+Known low-confidence rows with invalid identities remain held with version zero
+and no usable key; recording such a diagnostic does not corroborate anything.
+
+A missing synthesis timestamp selects explicit session scope. A present invalid
+timestamp is rejected. The original session is the scope ID; `unscoped:` has no
+special meaning and is ordinary review text. Session-scoped rows cannot lift
+automatically. To confirm one explicitly:
+
+```bash
+if AFFECTED=$(_interspect_corroborate_evidence \
+    "$AGENT_NAME" "$ORIGINAL_SESSION" "$FINDING_ID" "$OTHER_SESSION" \
+    "$OVERRIDE_REASON" session); then
+    echo "Corroborated rows: $AFFECTED"  # zero is a successful no-op
+else
+    echo "Corroboration rejected or database unavailable; no success recorded." >&2
+    exit 1
 fi
 ```
 
-This is best-effort — if no finding ID is identifiable or no `findings.json` is in scope, `LOW_CONFIDENCE` stays `"false"` and the correction is recorded exactly as before. Never block on this lookup. If `LOW_CONFIDENCE` is true but `REVIEW_ID` could not be determined, still pass `finding_id` through (the row is gated, fail-safe) but omit `review_id` — such a row can only be lifted via explicit `_interspect_corroborate_evidence`, never by a second correction, since an un-namespaced key never self-matches.
-
-## Record Evidence
-
-```bash
-_interspect_ensure_db
-
-# Build context JSON (use jq for proper escaping). low_confidence/finding_id/
-# review_id are the severity-tier confidence gate fields —
-# when set, lib-interspect.sh quarantines this evidence until a second
-# independent correction with a MATCHING override_reason corroborates the
-# same review_id:finding_id (a bare finding_id is positional per run and
-# would otherwise collide across unrelated runs).
-CONTEXT=$(jq -n \
-    --arg desc "$DESCRIPTION" \
-    --arg reason "$OVERRIDE_REASON" \
-    --argjson low_confidence "${LOW_CONFIDENCE:-false}" \
-    --arg finding_id "${FINDING_ID:-}" \
-    --arg review_id "${REVIEW_ID:-}" \
-    '{description: $desc, override_reason: $reason} +
-     (if $low_confidence then {low_confidence: true} else {} end) +
-     (if $finding_id != "" then {finding_id: $finding_id} else {} end) +
-     (if $review_id != "" then {review_id: $review_id} else {} end)')
-
-_interspect_insert_evidence \
-    "$CLAUDE_SESSION_ID" \
-    "$AGENT_NAME" \
-    "override" \
-    "$OVERRIDE_REASON" \
-    "$CONTEXT" \
-    "interspect-correction"
-```
+Review-scoped confirmation uses the review ID and omits the final `session`
+argument (or passes `review`). Invalid requests return 1 without stdout;
+database failures return 2. Never hide either failure with `|| true`.
 
 ## Kernel Dual-Write (best-effort)
 
-After the legacy write succeeds, also write to the Intercore kernel's `interspect_events` table so corrections are visible to kernel-side consumers:
+Only after the local write above succeeds, also write to the Intercore kernel's `interspect_events` table so corrections are visible to kernel-side consumers:
 
 ```bash
-# Dual-write to intercore kernel (fail-open)
+# Optional kernel replication after local success; never replicate a rejected request.
 if command -v ic &>/dev/null; then
     PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
     RUN_ID=$(ic run current --project="$PROJECT_ROOT" 2>/dev/null) || RUN_ID=""

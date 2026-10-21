@@ -21,7 +21,7 @@ for proj in proj-alpha proj-beta proj-gamma; do
     local_db="$TEST_DIR/projects/${proj}/.clavain/interspect/interspect.db"
     sqlite3 "$local_db" "$(cat <<'SQL'
 CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY, start_ts TEXT, end_ts TEXT, project TEXT, run_id TEXT, source TEXT);
-CREATE TABLE IF NOT EXISTS evidence (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, session_id TEXT, seq INTEGER, source TEXT, source_version TEXT, event TEXT, override_reason TEXT, context TEXT, project TEXT, project_lang TEXT, project_type TEXT, source_event_id TEXT, source_table TEXT, raw_override_reason TEXT);
+CREATE TABLE IF NOT EXISTS evidence (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, session_id TEXT, seq INTEGER, source TEXT, source_version TEXT, event TEXT, override_reason TEXT, context TEXT DEFAULT '{}', project TEXT, project_lang TEXT, project_type TEXT, source_event_id TEXT, source_table TEXT, raw_override_reason TEXT, quarantine_until INTEGER DEFAULT 0, low_confidence INTEGER DEFAULT 0, gate_version INTEGER NOT NULL DEFAULT 0, corroborated_at INTEGER DEFAULT 0);
 SQL
     )" 2>/dev/null
 done

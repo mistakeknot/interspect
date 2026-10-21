@@ -88,16 +88,16 @@ INSERT INTO sessions (session_id, start_ts, end_ts, project) VALUES
   ('s5', datetime('now', '-2 days'), datetime('now', '-2 days', '+1 hour'), 'test');
 
 INSERT INTO evidence (ts, session_id, seq, source, event, override_reason, context, project) VALUES
-  (datetime('now', '-25 days'), 's1', 1, 'fd-safety', 'agent_dispatch', '', '', 'test'),
-  (datetime('now', '-25 days'), 's1', 2, 'fd-safety', 'override', 'agent_wrong', '', 'test'),
-  (datetime('now', '-20 days'), 's2', 1, 'fd-safety', 'agent_dispatch', '', '', 'test'),
-  (datetime('now', '-20 days'), 's2', 2, 'fd-safety', 'override', 'agent_wrong', '', 'test'),
-  (datetime('now', '-10 days'), 's3', 1, 'fd-safety', 'agent_dispatch', '', '', 'test'),
-  (datetime('now', '-10 days'), 's3', 2, 'fd-safety', 'agent_dispatch', '', '', 'test'),
-  (datetime('now', '-5 days'), 's4', 1, 'fd-safety', 'agent_dispatch', '', '', 'test'),
-  (datetime('now', '-2 days'), 's5', 1, 'fd-safety', 'agent_dispatch', '', '', 'test'),
-  (datetime('now', '-2 days'), 's5', 2, 'fd-quality', 'agent_dispatch', '', '', 'test'),
-  (datetime('now', '-2 days'), 's5', 3, 'fd-quality', 'override', 'agent_wrong', '', 'test');
+  (datetime('now', '-25 days'), 's1', 1, 'fd-safety', 'agent_dispatch', '', '{}', 'test'),
+  (datetime('now', '-25 days'), 's1', 2, 'fd-safety', 'override', 'agent_wrong', '{}', 'test'),
+  (datetime('now', '-20 days'), 's2', 1, 'fd-safety', 'agent_dispatch', '', '{}', 'test'),
+  (datetime('now', '-20 days'), 's2', 2, 'fd-safety', 'override', 'agent_wrong', '{}', 'test'),
+  (datetime('now', '-10 days'), 's3', 1, 'fd-safety', 'agent_dispatch', '', '{}', 'test'),
+  (datetime('now', '-10 days'), 's3', 2, 'fd-safety', 'agent_dispatch', '', '{}', 'test'),
+  (datetime('now', '-5 days'), 's4', 1, 'fd-safety', 'agent_dispatch', '', '{}', 'test'),
+  (datetime('now', '-2 days'), 's5', 1, 'fd-safety', 'agent_dispatch', '', '{}', 'test'),
+  (datetime('now', '-2 days'), 's5', 2, 'fd-quality', 'agent_dispatch', '', '{}', 'test'),
+  (datetime('now', '-2 days'), 's5', 3, 'fd-quality', 'override', 'agent_wrong', '{}', 'test');
 "
 
 result=$(_interspect_effectiveness_report 30)
@@ -131,10 +131,10 @@ INSERT INTO sessions (session_id, start_ts, end_ts, project) VALUES
   ('s-old2', datetime('now', '-40 days'), datetime('now', '-40 days', '+1 hour'), 'test');
 
 INSERT INTO evidence (ts, session_id, seq, source, event, override_reason, context, project) VALUES
-  (datetime('now', '-45 days'), 's-old1', 1, 'fd-safety', 'agent_dispatch', '', '', 'test'),
-  (datetime('now', '-45 days'), 's-old1', 2, 'fd-safety', 'override', 'agent_wrong', '', 'test'),
-  (datetime('now', '-40 days'), 's-old2', 1, 'fd-safety', 'agent_dispatch', '', '', 'test'),
-  (datetime('now', '-40 days'), 's-old2', 2, 'fd-safety', 'override', 'agent_wrong', '', 'test');
+  (datetime('now', '-45 days'), 's-old1', 1, 'fd-safety', 'agent_dispatch', '', '{}', 'test'),
+  (datetime('now', '-45 days'), 's-old1', 2, 'fd-safety', 'override', 'agent_wrong', '{}', 'test'),
+  (datetime('now', '-40 days'), 's-old2', 1, 'fd-safety', 'agent_dispatch', '', '{}', 'test'),
+  (datetime('now', '-40 days'), 's-old2', 2, 'fd-safety', 'override', 'agent_wrong', '{}', 'test');
 "
 
 summary=$(_interspect_effectiveness_summary)
