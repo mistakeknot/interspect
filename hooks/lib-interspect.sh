@@ -174,6 +174,12 @@ MIGRATE
         # the post-sanitize context blob (which can be truncated/emptied).
         sqlite3 "$_INTERSPECT_DB" "ALTER TABLE evidence ADD COLUMN finding_key TEXT;" 2>/dev/null || true
         sqlite3 "$_INTERSPECT_DB" "CREATE INDEX IF NOT EXISTS idx_evidence_finding_key ON evidence(source, finding_key);" 2>/dev/null || true
+        # Backfill finding_key for gated rows written before the column existed,
+        # so they stay corroboratable. Idempotent (only NULL keys), guarded by
+        # json_valid because json_extract on malformed context aborts the
+        # statement. Mirrors _interspect_insert_evidence: review_id:finding_id,
+        # or the session-bound unscoped key when there is no review_id.
+        sqlite3 "$_INTERSPECT_DB" "UPDATE evidence SET finding_key = CASE WHEN COALESCE(json_extract(context, '\$.review_id'), '') != '' THEN json_extract(context, '\$.review_id') || ':' || json_extract(context, '\$.finding_id') ELSE 'unscoped:' || session_id || ':' || json_extract(context, '\$.finding_id') END WHERE low_confidence = 1 AND finding_key IS NULL AND json_valid(context) AND COALESCE(json_extract(context, '\$.finding_id'), '') != '';" 2>/dev/null || true
         # Add source_kind discriminator (sylveste-sfhq.1: telemetry fusion)
         # Allowed values: agent | tool | pattern | skill (skill added sylveste-7aj8.1).
         # CHECK constraint can't be added by ALTER TABLE in SQLite — enforced at insert
@@ -3283,9 +3289,11 @@ _interspect_insert_evidence() {
     local corroborated_at=0
     if [[ "$is_low_confidence" == "1" ]]; then
         quarantine_until=$_INTERSPECT_LOW_CONFIDENCE_SENTINEL
-        if [[ -n "$finding_key" ]]; then
+        # Both sides of an automatic corroboration need a real session id: an
+        # empty one would count as "a different session" from any named one.
+        if [[ -n "$finding_key" && -n "$session_id" ]]; then
             local already_gated
-            already_gated=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${e_source}' AND low_confidence = 1 AND session_id != '${e_session}' AND override_reason = '${e_reason}' AND finding_key = '${e_finding_key}';" 2>/dev/null) || already_gated=0
+            already_gated=$(sqlite3 "$db" "SELECT COUNT(*) FROM evidence WHERE source = '${e_source}' AND low_confidence = 1 AND session_id != '' AND session_id != '${e_session}' AND override_reason = '${e_reason}' AND finding_key = '${e_finding_key}';" 2>/dev/null) || already_gated=0
             if [[ "${already_gated:-0}" -gt 0 ]]; then
                 corroborated_at=$(date +%s)
                 quarantine_until=0

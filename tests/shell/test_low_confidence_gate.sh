@@ -385,6 +385,50 @@ assert_eq "P2: a different named session lifts the unscoped row" "$AFFECTED" "1"
 LEFT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE session_id='sess-u2' AND corroborated_at > 0;")
 assert_eq "P2: the other session's unscoped row stays gated" "$LEFT" "0"
 
+# Automatic corroboration needs a real session id on both sides.
+sqlite3 "$DB" "DELETE FROM evidence;"
+_interspect_insert_evidence "" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"run-e","finding_id":"P0-1"}' "interspect-correction"
+_interspect_insert_evidence "sess-real" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"run-e","finding_id":"P0-1"}' "interspect-correction"
+ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE corroborated_at > 0;")
+assert_eq "empty session first, then named: 0 corroborated" "$ROWS" "0"
+sqlite3 "$DB" "DELETE FROM evidence;"
+_interspect_insert_evidence "sess-real" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"run-e","finding_id":"P0-1"}' "interspect-correction"
+_interspect_insert_evidence "" "fd-bypass" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"run-e","finding_id":"P0-1"}' "interspect-correction"
+ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE corroborated_at > 0;")
+assert_eq "named session first, then empty: 0 corroborated" "$ROWS" "0"
+
+# Migration: gated rows written before finding_key existed are backfilled.
+BF_PROJECT_DIR="$TEST_DIR/bf-project"
+mkdir -p "$BF_PROJECT_DIR/.clavain/interspect"
+BF_DB="$BF_PROJECT_DIR/.clavain/interspect/interspect.db"
+sqlite3 "$BF_DB" "
+    CREATE TABLE evidence (
+        ts TEXT, session_id TEXT, seq INTEGER, source TEXT, source_version TEXT,
+        event TEXT, override_reason TEXT, context TEXT, project TEXT,
+        project_lang TEXT, project_type TEXT,
+        quarantine_until INTEGER DEFAULT 0, low_confidence INTEGER DEFAULT 0, corroborated_at INTEGER DEFAULT 0
+    );
+    INSERT INTO evidence (ts, session_id, seq, source, event, override_reason, context, project, quarantine_until, low_confidence)
+    VALUES ('2026-01-01T00:00:00Z', 'bf-1', 1, 'fd-bf', 'override', 'agent_wrong', '{\"review_id\":\"run-bf\",\"finding_id\":\"P0-1\",\"low_confidence\":true}', 'test', $_INTERSPECT_LOW_CONFIDENCE_SENTINEL, 1);
+    INSERT INTO evidence (ts, session_id, seq, source, event, override_reason, context, project, quarantine_until, low_confidence)
+    VALUES ('2026-01-01T00:00:01Z', 'bf-2', 2, 'fd-bf', 'override', 'agent_wrong', '{\"finding_id\":\"P0-2\",\"low_confidence\":true}', 'test', $_INTERSPECT_LOW_CONFIDENCE_SENTINEL, 1);
+    INSERT INTO evidence (ts, session_id, seq, source, event, override_reason, context, project, quarantine_until, low_confidence)
+    VALUES ('2026-01-01T00:00:02Z', 'bf-3', 3, 'fd-bf', 'override', 'agent_wrong', '{truncated', 'test', $_INTERSPECT_LOW_CONFIDENCE_SENTINEL, 1);
+"
+_SAVED_DB="${_INTERSPECT_DB:-}"
+CLAUDE_PROJECT_DIR="$BF_PROJECT_DIR" _interspect_ensure_db
+BF_KEYS=$(sqlite3 "$BF_DB" "SELECT COALESCE(finding_key,'NULL') FROM evidence ORDER BY seq;")
+assert_eq "migration backfills finding_key for already-gated rows (malformed context left NULL)" "$BF_KEYS" "run-bf:P0-1
+unscoped:bf-2:P0-2
+NULL"
+BF_AFFECTED=$(_interspect_corroborate_evidence "fd-bf" "run-bf" "P0-1" "sess-judge")
+_INTERSPECT_DB="$_SAVED_DB"
+assert_eq "backfilled gated row can now be explicitly corroborated" "$BF_AFFECTED" "1"
+
 echo ""
 echo "=== Existing (non-flagged) behaviour is unchanged ==="
 
