@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 SENTINEL = 4102444800
 REASONS = ('agent_wrong', 'deprioritized', 'already_fixed', 'stale_finding',
            'not_applicable', 'severity_miscalibrated')
-GUARD_REVISION = 4
+GUARD_REVISION = 5
 
 
 class GateDependencyError(RuntimeError):

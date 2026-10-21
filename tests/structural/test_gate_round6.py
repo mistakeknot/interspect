@@ -281,3 +281,27 @@ def test_tool_mode_target_is_validated_and_escaped_before_sql(template, tmp_path
     ok = run_block(preamble + "\nTARGET=Bash\n" + block, tmp_path, 'echo "COUNT=$PATTERN_COUNT"')
     assert ok.returncode == 0, ok.stderr
     assert 'COUNT=0' in ok.stdout
+
+
+# ── Round 7: databases already at revision 4 must still be repaired ─────────
+
+def test_database_migrated_by_previous_head_is_upgraded_without_editing_marker(db):
+    """The previous head's own migration writes revision 4 and leaves an overlay
+    canary active; the current migration must repair it on its own."""
+    previous = ROOT / 'tests/fixtures/interspect_gate_rev4.py'
+    assert cli(db, 'insert', row()).returncode == 0
+    assert cli(db, 'corroborate', explicit()).returncode == 0
+    cid = add_canary(db, 'fd-a/tuning')
+    with sqlite3.connect(db) as conn:
+        conn.execute('DELETE FROM interspect_gate_schema')
+    old = subprocess.run(['python3', str(previous), 'migrate', str(db)], input='{}',
+                         capture_output=True, text=True, timeout=20)
+    assert old.returncode == 0, old.stderr
+    with sqlite3.connect(db) as conn:
+        assert conn.execute('SELECT guard_revision FROM interspect_gate_schema').fetchone()[0] == 4
+    assert canary_state(db, cid)[0] == 'active'
+    result = cli(db, 'migrate', {})
+    assert result.returncode == 0, result.stderr
+    assert canary_state(db, cid) == ('needs_review', None, 0)
+    with sqlite3.connect(db) as conn:
+        assert conn.execute('SELECT guard_revision FROM interspect_gate_schema').fetchone()[0] == 5

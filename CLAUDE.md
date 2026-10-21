@@ -53,7 +53,7 @@ zero; neither lift path can corroborate them. Migration also catches agent rows
 whose column says false but whose context says true, or whose context cannot be
 strictly parsed. It prints the held-row count and a REVIEW REQUIRED override
 count. Audit records and override-review entries are retained on repeat repair.
-The v2 marker's `guard_revision` upgrades pre-fix guards transactionally; such
+The v2 marker's `guard_revision` (now 5) upgrades pre-fix guards transactionally; such
 an upgrade re-quarantines evidence and preserves valid canonical v2 identities.
 Revision 2 also repairs override reporting from retained audit snapshots. It
 prints every previously exposed evidence ID now held, including context-only
