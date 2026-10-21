@@ -2684,7 +2684,9 @@ _interspect_process_disagreement_event() {
     impact=$(echo "$event_json" | jq -r '.impact // empty') || return 0
     agents_json=$(echo "$event_json" | jq -r '.agents_json // "{}"') || return 0
     dismissal_reason=$(echo "$event_json" | jq -r '.dismissal_reason // empty') || return 0
-    session_id=$(echo "$event_json" | jq -r '.session_id // "unknown"') || return 0
+    # An absent/null session_id stays empty (not "unknown"): an empty session is
+    # never a valid corroborating actor in _interspect_insert_evidence.
+    session_id=$(echo "$event_json" | jq -r '.session_id // empty') || return 0
     # Round-2 M4: optional per-run identity, when the producer supplies one
     # (e.g. Clavain resolve.md's review_run_id), used to namespace finding_key
     # exactly like the manual correction path (Sylveste-06i.4 M1). Absent for
@@ -2777,7 +2779,9 @@ _interspect_process_execution_defect() {
     chosen_severity=$(echo "$event_json" | jq -r '.chosen_severity // empty') || return 0
     impact=$(echo "$event_json" | jq -r '.impact // empty') || return 0
     agents_json=$(echo "$event_json" | jq -r '.agents_json // "{}"') || return 0
-    session_id=$(echo "$event_json" | jq -r '.session_id // "unknown"') || return 0
+    # An absent/null session_id stays empty (not "unknown"): an empty session is
+    # never a valid corroborating actor in _interspect_insert_evidence.
+    session_id=$(echo "$event_json" | jq -r '.session_id // empty') || return 0
 
     [[ -z "$finding_id" || -z "$resolution" ]] && return 0
 
@@ -3317,6 +3321,8 @@ _interspect_insert_evidence() {
 # re-judge pass or an explicit human confirmation records corroboration this
 # way instead of a second override).
 # Args: $1=source (agent) $2=review_id $3=finding_id $4=corroborated_by
+#   $5=override_reason (REQUIRED — only rows recorded with this same reason
+#   are lifted, matching the automatic path's same-reason rule).
 #   (REQUIRED, non-empty — a session/actor identifier for the corroborating
 #   signal; round-2 N3: rows whose session_id equals corroborated_by are excluded from the
 #   UPDATE, so the session that set the gate can never lift its own gate
@@ -3325,16 +3331,17 @@ _interspect_insert_evidence() {
 # _interspect_insert_evidence (round-2 M1/M3).
 # Rows recorded without a run identity use review_id "unscoped:<their session_id>".
 # Output: count of rows corroborated (0 if none were gated for that finding).
-# Returns 1 (no output) on missing source/review_id/finding_id/corroborated_by.
+# Returns 1 (no output) on missing source/review_id/finding_id/corroborated_by/reason.
 _interspect_corroborate_evidence() {
-    local source="$1" review_id="$2" finding_id="$3" corroborated_by="${4:-}"
-    [[ -n "$source" && -n "$review_id" && -n "$finding_id" ]] || return 1
+    local source="$1" review_id="$2" finding_id="$3" corroborated_by="${4:-}" reason="${5:-}"
+    [[ -n "$source" && -n "$review_id" && -n "$finding_id" && -n "$reason" ]] || return 1
     # The corroborating actor is mandatory: with it empty the session
     # independence check below would not exclude anyone.
     [[ -n "$corroborated_by" ]] || return 1
     local db="${_INTERSPECT_DB:-$(_interspect_db_path)}"
     [[ -f "$db" ]] || return 1
-    local e_source e_finding_key e_corroborated_by now
+    local e_source e_finding_key e_corroborated_by e_reason now
+    e_reason=$(_interspect_sql_escape "$reason")
     e_source=$(_interspect_sql_escape "$source")
     e_finding_key=$(_interspect_sql_escape "${review_id}:${finding_id}")
     e_corroborated_by=$(_interspect_sql_escape "$corroborated_by")
@@ -3343,7 +3350,7 @@ _interspect_corroborate_evidence() {
     # the affected-count is atomic with the update (no separate COUNT-then-
     # UPDATE race — round-2 N3).
     local affected
-    affected=$(sqlite3 "$db" "UPDATE evidence SET quarantine_until = 0, corroborated_at = ${now} WHERE source = '${e_source}' AND low_confidence = 1 AND corroborated_at = 0 AND finding_key = '${e_finding_key}' AND session_id != '${e_corroborated_by}'; SELECT changes();" 2>/dev/null) || affected=0
+    affected=$(sqlite3 "$db" "UPDATE evidence SET quarantine_until = 0, corroborated_at = ${now} WHERE source = '${e_source}' AND low_confidence = 1 AND corroborated_at = 0 AND finding_key = '${e_finding_key}' AND override_reason = '${e_reason}' AND session_id != '${e_corroborated_by}'; SELECT changes();" 2>/dev/null) || affected=0
     echo "${affected:-0}"
 }
 

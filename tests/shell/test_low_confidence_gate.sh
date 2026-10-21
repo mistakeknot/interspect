@@ -193,10 +193,10 @@ GATED_BEFORE=$(sqlite3 "$DB" "SELECT quarantine_until FROM evidence WHERE sessio
 assert_eq "explicit-corroborate test: starts gated" "$GATED_BEFORE" "$_INTERSPECT_LOW_CONFIDENCE_SENTINEL"
 
 # The flagging session itself may not self-corroborate (N3).
-SELF_AFFECTED=$(_interspect_corroborate_evidence "fd-correctness" "run-y" "P1-9" "sess-3")
+SELF_AFFECTED=$(_interspect_corroborate_evidence "fd-correctness" "run-y" "P1-9" "sess-3" "agent_wrong")
 assert_eq "self-corroboration (same session) is refused" "$SELF_AFFECTED" "0"
 
-AFFECTED=$(_interspect_corroborate_evidence "fd-correctness" "run-y" "P1-9" "sess-reviewer")
+AFFECTED=$(_interspect_corroborate_evidence "fd-correctness" "run-y" "P1-9" "sess-reviewer" "agent_wrong")
 assert_eq "_interspect_corroborate_evidence reports 1 row lifted by a different actor" "$AFFECTED" "1"
 
 GATED_AFTER=$(sqlite3 "$DB" "SELECT quarantine_until, corroborated_at > 0 FROM evidence WHERE session_id='sess-3';")
@@ -360,9 +360,9 @@ assert_eq "P1: unreadable findings.json yields no review_id (rc 1)" "$RID_MISSIN
 sqlite3 "$DB" "DELETE FROM evidence;"
 _interspect_insert_evidence "sess-orig" "fd-bypass" "override" "agent_wrong" \
     '{"low_confidence":true,"review_id":"run-b","finding_id":"P0-1"}' "interspect-correction"
-OUT=$(_interspect_corroborate_evidence "fd-bypass" "run-b" "P0-1") && RC=0 || RC=$?
+OUT=$(_interspect_corroborate_evidence "fd-bypass" "run-b" "P0-1" "" "agent_wrong") && RC=0 || RC=$?
 assert_eq "P2: omitted corroborating actor is refused (rc 1, no output)" "$RC|$OUT" "1|"
-OUT=$(_interspect_corroborate_evidence "fd-bypass" "run-b" "P0-1" "") && RC=0 || RC=$?
+OUT=$(_interspect_corroborate_evidence "fd-bypass" "run-b" "P0-1" "" "agent_wrong") && RC=0 || RC=$?
 assert_eq "P2: empty corroborating actor is refused (rc 1, no output)" "$RC|$OUT" "1|"
 STILL=$(sqlite3 "$DB" "SELECT low_confidence, corroborated_at FROM evidence WHERE session_id='sess-orig';")
 assert_eq "P2: refused calls leave the gate in place" "$STILL" "1|0"
@@ -378,9 +378,9 @@ _interspect_insert_evidence "sess-u2" "fd-bypass" "override" "agent_wrong" \
     '{"low_confidence":true,"finding_id":"P0-7"}' "interspect-correction"
 ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE corroborated_at > 0;")
 assert_eq "P2: a second unscoped correction does NOT corroborate" "$ROWS" "0"
-AFFECTED=$(_interspect_corroborate_evidence "fd-bypass" "unscoped:sess-u1" "P0-7" "sess-u1")
+AFFECTED=$(_interspect_corroborate_evidence "fd-bypass" "unscoped:sess-u1" "P0-7" "sess-u1" "agent_wrong")
 assert_eq "P2: the original session cannot lift its own unscoped row" "$AFFECTED" "0"
-AFFECTED=$(_interspect_corroborate_evidence "fd-bypass" "unscoped:sess-u1" "P0-7" "sess-judge")
+AFFECTED=$(_interspect_corroborate_evidence "fd-bypass" "unscoped:sess-u1" "P0-7" "sess-judge" "agent_wrong")
 assert_eq "P2: a different named session lifts the unscoped row" "$AFFECTED" "1"
 LEFT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE session_id='sess-u2' AND corroborated_at > 0;")
 assert_eq "P2: the other session's unscoped row stays gated" "$LEFT" "0"
@@ -400,6 +400,32 @@ _interspect_insert_evidence "" "fd-bypass" "override" "agent_wrong" \
     '{"low_confidence":true,"review_id":"run-e","finding_id":"P0-1"}' "interspect-correction"
 ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE corroborated_at > 0;")
 assert_eq "named session first, then empty: 0 corroborated" "$ROWS" "0"
+
+# Round 4: disagreement events with an absent/null session_id must not become
+# a corroborating "unknown" actor, and explicit corroboration is per-reason.
+sqlite3 "$DB" "DELETE FROM evidence;"
+EV_NOSESS='{"id":"e1","finding_id":"P0-9","resolution":"accepted","chosen_severity":"P0","impact":"severity_overridden","agents_json":"{\"fd-r4\":\"P2\"}","review_run_id":"run-r4"}'
+EV_NULLSESS='{"id":"e2","session_id":null,"finding_id":"P0-9","resolution":"accepted","chosen_severity":"P0","impact":"severity_overridden","agents_json":"{\"fd-r4\":\"P2\"}","review_run_id":"run-r4"}'
+_interspect_process_disagreement_event "$EV_NOSESS"
+_interspect_process_disagreement_event "$EV_NULLSESS"
+R4=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE session_id='unknown';")
+assert_eq "R4: absent/null session_id is never stored as 'unknown'" "$R4" "0"
+R4=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE corroborated_at > 0;")
+assert_eq "R4: two sessionless disagreement events do not corroborate" "$R4" "0"
+
+sqlite3 "$DB" "DELETE FROM evidence;"
+_interspect_insert_evidence "sess-m1" "fd-r4" "override" "agent_wrong" \
+    '{"low_confidence":true,"review_id":"run-m","finding_id":"P0-3"}' "interspect-correction"
+_interspect_insert_evidence "sess-m2" "fd-r4" "override" "deprioritized" \
+    '{"low_confidence":true,"review_id":"run-m","finding_id":"P0-3"}' "interspect-correction"
+R4=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE corroborated_at > 0;")
+assert_eq "R4: different override_reason does not auto-corroborate" "$R4" "0"
+OUT=$(_interspect_corroborate_evidence "fd-r4" "run-m" "P0-3" "sess-judge") && RC=0 || RC=$?
+assert_eq "R4: explicit corroboration without a reason is refused" "$RC|$OUT" "1|"
+AFFECTED=$(_interspect_corroborate_evidence "fd-r4" "run-m" "P0-3" "sess-judge" "agent_wrong")
+assert_eq "R4: explicit corroboration lifts only the named reason" "$AFFECTED" "1"
+LEFT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM evidence WHERE override_reason='deprioritized' AND corroborated_at > 0;")
+assert_eq "R4: the differently-reasoned row stays gated" "$LEFT" "0"
 
 # Migration: gated rows written before finding_key existed are backfilled.
 BF_PROJECT_DIR="$TEST_DIR/bf-project"
@@ -425,7 +451,7 @@ BF_KEYS=$(sqlite3 "$BF_DB" "SELECT COALESCE(finding_key,'NULL') FROM evidence OR
 assert_eq "migration backfills finding_key for already-gated rows (malformed context left NULL)" "$BF_KEYS" "run-bf:P0-1
 unscoped:bf-2:P0-2
 NULL"
-BF_AFFECTED=$(_interspect_corroborate_evidence "fd-bf" "run-bf" "P0-1" "sess-judge")
+BF_AFFECTED=$(_interspect_corroborate_evidence "fd-bf" "run-bf" "P0-1" "sess-judge" "agent_wrong")
 _INTERSPECT_DB="$_SAVED_DB"
 assert_eq "backfilled gated row can now be explicitly corroborated" "$BF_AFFECTED" "1"
 
