@@ -88,7 +88,7 @@ If "Show evidence details" is selected, query evidence for each eligible agent:
 ```bash
 local escaped
 escaped=$(_interspect_sql_escape "$agent")
-sqlite3 -separator '|' "$DB" "SELECT ts, override_reason, substr(context, 1, 200) FROM evidence WHERE source = '${escaped}' AND event = 'override' ORDER BY ts DESC LIMIT 5;"
+sqlite3 -separator '|' "$DB" "SELECT ts, override_reason, substr(context, 1, 200) FROM evidence WHERE source = '${escaped}' AND event = 'override' AND $(_interspect_eligible_sql) ORDER BY ts DESC LIMIT 5;"
 ```
 
 Format as human-readable summaries:
@@ -166,8 +166,8 @@ For each overlay-eligible pattern, draft the tuning instruction:
 ```bash
 local escaped
 escaped=$(_interspect_sql_escape "$agent")
-CONTEXTS=$(sqlite3 "$DB" "SELECT context FROM evidence WHERE source = '${escaped}' AND event = 'override' AND override_reason = 'agent_wrong' ORDER BY ts DESC LIMIT 10;")
-EVIDENCE_IDS=$(sqlite3 "$DB" "SELECT id FROM evidence WHERE source = '${escaped}' AND event = 'override' AND override_reason = 'agent_wrong' ORDER BY ts DESC LIMIT 10;")
+CONTEXTS=$(sqlite3 "$DB" "SELECT context FROM evidence WHERE source = '${escaped}' AND event = 'override' AND $(_interspect_eligible_sql) AND override_reason = 'agent_wrong' ORDER BY ts DESC LIMIT 10;")
+EVIDENCE_IDS=$(sqlite3 "$DB" "SELECT id FROM evidence WHERE source = '${escaped}' AND event = 'override' AND $(_interspect_eligible_sql) AND override_reason = 'agent_wrong' ORDER BY ts DESC LIMIT 10;")
 ```
 
 2. Summarize the pattern: analyze what the agent gets wrong and in what contexts

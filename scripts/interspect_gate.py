@@ -15,6 +15,19 @@ from datetime import datetime, timezone
 SENTINEL = 4102444800
 REASONS = ('agent_wrong', 'deprioritized', 'already_fixed', 'stale_finding',
            'not_applicable', 'severity_miscalibrated')
+GUARD_REVISION = 1
+
+
+class GateDependencyError(RuntimeError):
+    pass
+
+
+def require_json1(db):
+    try:
+        db.execute("SELECT json_array('v2'), json_valid('{}'), json_type('{}'), "
+                   "json_extract('{}','$.low_confidence') FROM json_tree('{}')").fetchone()
+    except sqlite3.Error as error:
+        raise GateDependencyError('SQLite JSON1 is required; gate writes stopped') from error
 
 
 def normalize_field(kind, value):
@@ -27,7 +40,7 @@ def normalize_field(kind, value):
         pattern = r'[a-z0-9][a-z0-9._-]{0,127}'
         value = value.lower()
     elif kind in ('review_id', 'finding_id'):
-        pattern = r'[a-z0-9][a-z0-9._:@+-]{0,255}'
+        pattern = r'[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}'
     elif kind == 'source':
         value = value.lower()
         for prefix in ('interflux:review:', 'interflux:'):
@@ -64,6 +77,16 @@ def parse_object(raw):
     if not isinstance(value, dict):
         raise ValueError('JSON object required')
     return value
+
+
+def context_requires_gate(raw):
+    """Conservative classification for legacy rows; malformed is never false."""
+    try:
+        context = parse_object(raw)
+        low = context.get('low_confidence', False)
+        return type(low) is not bool or low
+    except (ValueError, TypeError):
+        return True
 
 
 def finding_key(db, scope, scope_id, finding_id):
@@ -103,22 +126,34 @@ def sql_identity(column, kind):
     """Connection-independent, NUL-safe canonical whitelist for persistent guards."""
     x = 'NEW.' + column
     alphabet = 'a-z0-9._-'
+    initial = 'a-z0-9'
     maximum = 128
     if kind in ('review_id', 'finding_id'):
-        alphabet = 'a-z0-9._:@+-'
+        alphabet = 'A-Za-z0-9._:@+-'
+        initial = 'A-Za-z0-9'
         maximum = 256
     common = (f"typeof({x})='text' AND length(CAST({x} AS BLOB))=length({x}) "
               f"AND instr({x},char(0))=0 AND length({x}) BETWEEN 1 AND {maximum} "
-              f"AND {x} NOT IN ('unknown','null')")
+              f"AND lower({x}) NOT IN ('unknown','null')")
     if kind == 'source':
         return f"({common} AND {x} GLOB 'fd-[a-z]*' AND {x} NOT GLOB '*[^a-z0-9-]*')"
     if kind == 'override_reason':
         members = ','.join(repr(reason) for reason in REASONS)
         return f"({common} AND {x} IN ({members}))"
-    return f"({common} AND {x} GLOB '[a-z0-9]*' AND {x} NOT GLOB '*[^{alphabet}]*')"
+    return f"({common} AND {x} GLOB '[{initial}]*' AND {x} NOT GLOB '*[^{alphabet}]*')"
 
 
 def install_guards(db):
+    # CASE evaluates lazily, so malformed JSON reaches RAISE instead of a JSON
+    # parser error. Duplicate object keys are rejected, including nested ones.
+    context_requires_hold = """CASE
+        WHEN json_valid(NEW.context) IS NOT 1 THEN 1
+        WHEN json_type(NEW.context) <> 'object' THEN 1
+        WHEN EXISTS (SELECT 1 FROM json_tree(NEW.context)
+                     GROUP BY parent,key HAVING COUNT(*) > 1) THEN 1
+        WHEN json_type(NEW.context,'$.low_confidence') IS NULL THEN 0
+        WHEN json_type(NEW.context,'$.low_confidence') NOT IN ('true','false') THEN 1
+        ELSE json_type(NEW.context,'$.low_confidence')='true' END"""
     canonical = ' AND '.join([
         sql_identity('gate_session', 'session_id'), sql_identity('gate_source', 'source'),
         sql_identity('gate_reason', 'override_reason'), sql_identity('gate_finding_id', 'finding_id'),
@@ -153,7 +188,9 @@ def install_guards(db):
              f"AND (NEW.low_confidence=0 OR ({held}) OR ({lifted}))")
     immutable = ' OR '.join(f'NEW.{col} IS NOT OLD.{col}' for col in IDENTITY_COLUMNS)
     for action in ('INSERT', 'UPDATE'):
-        statements = [f"SELECT CASE WHEN ({valid}) IS NOT 1 THEN RAISE(ABORT,'invalid gate state') END;"]
+        statements = ["SELECT CASE WHEN NEW.source_kind='agent' AND NEW.low_confidence IS NOT 1 "
+                      f"AND ({context_requires_hold}) THEN RAISE(ABORT,'context requires gate') END;",
+                      f"SELECT CASE WHEN ({valid}) IS NOT 1 THEN RAISE(ABORT,'invalid gate state') END;"]
         if action == 'INSERT':
             statements.append(f"SELECT CASE WHEN NEW.low_confidence=1 AND ({held}) IS NOT 1 "
                               "THEN RAISE(ABORT,'new gate must be held') END;")
@@ -177,10 +214,17 @@ def migrated(db):
     row = db.execute('SELECT version FROM interspect_gate_schema').fetchone()
     if row is not None and row[0] != 2:
         raise ValueError('unsupported gate schema version')
-    return row is not None
+    columns = {r[1] for r in db.execute('PRAGMA table_info(interspect_gate_schema)')}
+    if row is None or 'guard_revision' not in columns:
+        return False
+    revision = db.execute('SELECT guard_revision FROM interspect_gate_schema').fetchone()[0]
+    if revision > GUARD_REVISION:
+        raise ValueError('unsupported gate guard revision')
+    return revision == GUARD_REVISION
 
 
 def migrate(db, overrides_path=None):
+    require_json1(db)
     # Read-only fast path: ordinary hook initialization must not take a write lock.
     if migrated(db):
         return
@@ -203,32 +247,50 @@ def migrate(db, overrides_path=None):
         for name, declaration in GATE_COLUMNS.items():
             if name not in columns:
                 db.execute(f'ALTER TABLE evidence ADD COLUMN {name} {declaration}')
-        db.execute('CREATE TABLE interspect_gate_audit (evidence_id INTEGER PRIMARY KEY, previous_row TEXT NOT NULL)')
-        db.execute('CREATE TABLE interspect_gate_override_review (override_json TEXT NOT NULL)')
-        cursor = db.execute('SELECT * FROM evidence WHERE low_confidence=1')
+        db.execute('CREATE TABLE IF NOT EXISTS interspect_gate_audit (evidence_id INTEGER PRIMARY KEY, previous_row TEXT NOT NULL)')
+        db.execute('CREATE TABLE IF NOT EXISTS interspect_gate_override_review (override_json TEXT NOT NULL)')
+        # Refresh pre-fix v2 guards transactionally. Rollback restores old guards.
+        for action in ('insert', 'update'):
+            db.execute('DROP TRIGGER IF EXISTS interspect_gate_' + action)
+        cursor = db.execute('SELECT * FROM evidence')
         names = [d[0] for d in cursor.description]
-        rows = [dict(zip(names, row)) for row in cursor.fetchall()]
+        candidates = [dict(zip(names, row)) for row in cursor.fetchall()]
+        rows = [row for row in candidates if row['low_confidence'] == 1 or
+                (row['source_kind'] == 'agent' and context_requires_gate(row['context']))]
         lifted_ids = set()
         for row in rows:
-            db.execute('INSERT INTO interspect_gate_audit VALUES (?,?)',
+            db.execute('INSERT OR IGNORE INTO interspect_gate_audit VALUES (?,?)',
                        (row['id'], json.dumps(row, ensure_ascii=True)))
             if row['corroborated_at'] and row['corroborated_at'] > 0:
                 lifted_ids.add(row['id'])
             fields = dict(gate_version=0, **{col: None for col in GATE_COLUMNS if col.startswith('gate_') and col != 'gate_version'})
             try:
-                context = parse_object(row['context'])
-                if context.get('low_confidence') is not True or row['source_kind'] != 'agent':
-                    raise ValueError('invalid legacy classification')
-                candidate = canonical_fields(row['session_id'], row['source'], row['override_reason'], context)
-                # Compare the old spelling BEFORE canonicalization; never split a concatenated key.
-                legacy_scope = context['review_id'] if 'review_id' in context else 'unscoped:' + row['session_id']
-                if legacy_scope + ':' + context['finding_id'] != row['finding_key']:
-                    raise ValueError('legacy key disagrees with context')
+                if row['source_kind'] != 'agent':
+                    raise ValueError('invalid classification')
+                if row['gate_version'] == 2:
+                    # Existing v2 identities are separate from truncated diagnostics.
+                    context = {'finding_id': row['gate_finding_id']}
+                    if row['gate_scope'] == 'review':
+                        context['review_id'] = row['gate_scope_id']
+                    candidate = canonical_fields(row['gate_session'], row['gate_source'], row['gate_reason'], context)
+                    if any(row[k] != v for k, v in candidate.items()):
+                        raise ValueError('invalid previous canonical identity')
+                    if row['gate_key'] != finding_key(db, candidate['gate_scope'], candidate['gate_scope_id'], candidate['gate_finding_id']):
+                        raise ValueError('invalid previous canonical key')
+                else:
+                    context = parse_object(row['context'])
+                    if context.get('low_confidence') is not True:
+                        raise ValueError('invalid legacy classification')
+                    candidate = canonical_fields(row['session_id'], row['source'], row['override_reason'], context)
+                    # Never split a concatenated key or reconstruct a NULL base-era key.
+                    legacy_scope = context['review_id'] if 'review_id' in context else 'unscoped:' + row['session_id']
+                    if legacy_scope + ':' + context['finding_id'] != row['finding_key']:
+                        raise ValueError('legacy key disagrees with context')
                 candidate['gate_key'] = finding_key(db, candidate['gate_scope'], candidate['gate_scope_id'], candidate['gate_finding_id'])
                 fields = candidate
             except (ValueError, TypeError, KeyError):
                 pass  # An invalid legacy row remains diagnostic and permanently held.
-            fields.update(quarantine_until=SENTINEL, corroborated_at=0,
+            fields.update(low_confidence=1, quarantine_until=SENTINEL, corroborated_at=0,
                           corroborated_by=None, corroborated_via=None)
             assignments = ','.join(name + '=?' for name in fields)
             db.execute(f'UPDATE evidence SET {assignments} WHERE id=?', (*fields.values(), row['id']))
@@ -238,13 +300,23 @@ def migrate(db, overrides_path=None):
                 raise ValueError('invalid routing overrides')
             for override in overrides:
                 if lifted_ids.intersection(override.get('evidence_ids', [])):
-                    db.execute('INSERT INTO interspect_gate_override_review VALUES (?)', (json.dumps(override),))
-        db.execute('CREATE INDEX idx_evidence_gate ON evidence '
+                    encoded = json.dumps(override, sort_keys=True)
+                    db.execute('INSERT INTO interspect_gate_override_review SELECT ? '
+                               'WHERE NOT EXISTS (SELECT 1 FROM interspect_gate_override_review WHERE override_json=?)',
+                               (encoded, encoded))
+        db.execute('CREATE INDEX IF NOT EXISTS idx_evidence_gate ON evidence '
                    '(gate_version,gate_source,gate_reason,gate_key,gate_session)')
         install_guards(db)
-        db.execute('CREATE TABLE interspect_gate_schema (version INTEGER NOT NULL)')
-        db.execute('INSERT INTO interspect_gate_schema VALUES (2)')
+        db.execute('CREATE TABLE IF NOT EXISTS interspect_gate_schema (version INTEGER NOT NULL)')
+        marker_columns = {r[1] for r in db.execute('PRAGMA table_info(interspect_gate_schema)')}
+        if 'guard_revision' not in marker_columns:
+            db.execute('ALTER TABLE interspect_gate_schema ADD COLUMN guard_revision INTEGER NOT NULL DEFAULT 0')
+        db.execute('DELETE FROM interspect_gate_schema')
+        db.execute('INSERT INTO interspect_gate_schema VALUES (2,?)', (GUARD_REVISION,))
         db.commit()
+        if rows:
+            print(f'interspect gate: {len(rows)} evidence rows held after migration; '
+                  'see interspect_gate_audit', file=sys.stderr)
     except BaseException:
         db.rollback()
         raise
@@ -327,7 +399,14 @@ def insert(db, request):
         for key, value in row.items():
             if not isinstance(value, str):
                 row[key] = json.dumps(value)
-        row.update(context=request.get('diagnostic_context', '{}'),
+        diagnostic = request.get('diagnostic_context', '{}')
+        try:
+            parse_object(diagnostic)
+        except (ValueError, TypeError):
+            # Sanitization may truncate JSON. Retain it as text in valid JSON;
+            # classification comes only from the strictly parsed raw request.
+            diagnostic = json.dumps(dict(diagnostic=diagnostic, low_confidence=low))
+        row.update(context=diagnostic,
                    ts=datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
                    source_kind=kind, low_confidence=int(low), corroborated_at=0,
                    quarantine_until=SENTINEL if low else request.get('quarantine_until', 0))
@@ -384,13 +463,15 @@ def disagreement_requests(raw):
     dismissal = event.get('dismissal_reason', '')
     reason = {'agent_wrong': 'agent_wrong', 'deprioritized': 'deprioritized',
               'already_fixed': 'stale_finding', 'not_applicable': 'not_applicable'}.get(dismissal, '')
-    low = dismissal == '' and event.get('resolution') == 'accepted' and event.get('impact') == 'severity_overridden'
-    if low:
+    severity_conflict = dismissal == '' and event.get('resolution') == 'accepted' and event.get('impact') == 'severity_overridden'
+    if severity_conflict:
         reason = 'severity_miscalibrated'
     if not event.get('finding_id') or not event.get('resolution') or not event.get('chosen_severity'):
         return []
     if 'low_confidence' in event and type(event['low_confidence']) is not bool:
         raise ValueError('invalid low-confidence classification')
+    # Missing classification is uncertain, never evidence of high confidence.
+    low = event.get('low_confidence', True) or severity_conflict
     result = []
     for agent, severity in agents.items():
         if severity == event['chosen_severity']:
@@ -406,11 +487,62 @@ def disagreement_requests(raw):
     return result
 
 
+def event_confidence(event):
+    """Ordinary telemetry may omit the flag; a present flag must be boolean.
+
+    Preserve either the top-level or nested context assertion. These producers
+    have no severity-conflict inference; disagreement uses its stricter policy.
+    """
+    nested = event.get('context', {})
+    if isinstance(nested, str):
+        nested = parse_object(nested)
+    if not isinstance(nested, dict):
+        raise ValueError('invalid event context')
+    flags = [obj.get('low_confidence', False) for obj in (event, nested)]
+    if any(type(flag) is not bool for flag in flags):
+        raise ValueError('invalid low-confidence classification')
+    return any(flags)
+
+
+def execution_defect_request(raw):
+    event = parse_object(raw)
+    low = event_confidence(event)
+    agents = event.get('agents_json', {})
+    agents = parse_object(agents) if isinstance(agents, str) else agents
+    if not isinstance(agents, dict):
+        raise ValueError('invalid agents')
+    target = agents.get('target') or next(iter(sorted(agents)), '')
+    if not target or not event.get('finding_id') or not event.get('resolution'):
+        raise ValueError('missing execution defect fields')
+    context = dict(finding_id=event['finding_id'], reporter=agents.get('reporter', ''),
+                   target=target, severity=event.get('chosen_severity', ''),
+                   resolution=event['resolution'], impact=event.get('impact', ''),
+                   low_confidence=low)
+    if 'review_run_id' in event:
+        context['review_id'] = event['review_run_id']
+    return dict(session_id=event.get('session_id', ''), source=target,
+                event='execution_defect', override_reason='', context=json.dumps(context),
+                source_kind='agent', source_event_id=event.get('id', ''),
+                source_table='review_events')
+
+
+def kernel_event_request(raw, session):
+    event = parse_object(raw)
+    low = event_confidence(event)
+    if any(not isinstance(event.get(key), str) or not event[key] for key in ('source', 'type')):
+        raise ValueError('missing kernel event fields')
+    context = {key: event.get(key, '') for key in ('run_id', 'from_state', 'to_state', 'timestamp')}
+    context.update(kernel_event_id=event.get('id', 0), low_confidence=low)
+    return dict(session_id=session, source='kernel-' + event['source'], event=event['type'],
+                override_reason='', context=json.dumps(context), source_kind='agent',
+                source_event_id=event.get('id', ''), source_table='events')
+
+
 def review_id_from_findings(path):
     data = parse_object(Path(path).read_text())
     base = Path(path).parent.name
     timestamp = data.get('synthesis_timestamp')
-    # Validate components without changing spelling; the gate boundary rejects uppercase.
+    # Validate components without changing spelling; IDs are case-sensitive.
     for component in (base, timestamp):
         if not isinstance(component, str) or not component.isascii() or re.fullmatch(
                 r'[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}', component, flags=re.ASCII) is None:
@@ -422,9 +554,14 @@ def review_id_from_findings(path):
 
 
 def correction_context(request):
-    context = dict(description=request.get('description', ''), low_confidence=False)
+    low = request.get('low_confidence', False)
+    if type(low) is not bool:
+        raise ValueError('low_confidence must be a JSON boolean')
+    context = dict(description=request.get('description', ''), low_confidence=low)
     finding = request.get('finding_id', '')
     if not finding:
+        if low:
+            raise ValueError('low-confidence correction requires a finding reference')
         return context
     normalize_field('finding_id', finding)
     path = request.get('findings_path', '')
@@ -435,7 +572,7 @@ def correction_context(request):
     matches = [f for f in findings if isinstance(f, dict) and f.get('id') == finding]
     if len(matches) != 1 or type(matches[0].get('low_confidence')) is not bool:
         raise ValueError('unknown finding classification')
-    context.update(finding_id=finding, low_confidence=matches[0]['low_confidence'])
+    context.update(finding_id=finding, low_confidence=low or matches[0]['low_confidence'])
     if 'synthesis_timestamp' in data:
         # Invalid/present run identity is an error; only absence selects session scope.
         context['review_id'] = review_id_from_findings(path)
@@ -453,6 +590,12 @@ def main():
             for request in disagreement_requests(sys.stdin.read()):
                 print(json.dumps(request))
             return 0
+        if operation == 'execution-defect':
+            print(json.dumps(execution_defect_request(sys.stdin.read())))
+            return 0
+        if operation == 'kernel-event':
+            print(json.dumps(kernel_event_request(sys.stdin.read(), sys.argv[2])))
+            return 0
         if operation == 'correction-context':
             print(json.dumps(correction_context(parse_object(sys.stdin.read()))))
             return 0
@@ -469,7 +612,8 @@ def main():
                 migrate(db, request.get('overrides_path'))
                 count = db.execute('SELECT COUNT(*) FROM interspect_gate_override_review').fetchone()[0]
                 if count:
-                    print(f'interspect: {count} routing overrides require review; see interspect_gate_override_review', file=sys.stderr)
+                    print(f'interspect gate: REVIEW REQUIRED: {count} routing overrides; '
+                          'see interspect_gate_override_review (report only, not reverted)', file=sys.stderr)
             elif operation == 'insert':
                 if len(sys.argv) > 3:
                     request.update(diagnostic_context=sys.argv[3], project=sys.argv[4],
@@ -482,6 +626,9 @@ def main():
             else:
                 raise ValueError('unknown gate operation')
         return 0
+    except GateDependencyError:
+        print('interspect gate: SQLite JSON1 is required; gate writes stopped', file=sys.stderr)
+        return 2
     except (ValueError, TypeError, KeyError, OSError, sqlite3.Error) as error:
         # Never print attacker-controlled values, database paths or partial counts.
         print('interspect gate: request failed (' + type(error).__name__ + ')', file=sys.stderr)

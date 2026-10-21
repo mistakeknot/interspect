@@ -99,7 +99,7 @@ def test_lock_timeout_is_failure(tmp_path):
 
 
 @pytest.mark.parametrize('changes', [dict(mode='bogus'), dict(scope=None), dict(now=0),
-    dict(now=True), dict(actor='a\n'), dict(scope_id='Run'), dict(finding_key='forged')])
+    dict(now=True), dict(actor='a\n'), dict(scope_id='Run\n'), dict(finding_key='forged')])
 def test_invalid_explicit_no_mutation(changes):
     db = ready()
     gate = gate_module()

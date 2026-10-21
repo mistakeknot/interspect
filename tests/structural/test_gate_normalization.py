@@ -21,6 +21,8 @@ def gate_module():
     ('session_id', 'SESSION-1', 'session-1'), ('actor', 'A._-9', 'a._-9'),
     ('review_id', 'a:b@c+d._-9', 'a:b@c+d._-9'),
     ('finding_id', 'p0-1', 'p0-1'), ('source', 'INTERFLUX:REVIEW:FD-SAFETY', 'fd-safety'),
+    ('finding_id', 'P0-1', 'P0-1'), ('review_id', 'Run', 'Run'),
+    ('review_id', 'basename@2026-02-14T08:45:32Z', 'basename@2026-02-14T08:45:32Z'),
     ('source', 'interflux:fd-safety', 'fd-safety'), ('source', 'fd-a', 'fd-a'),
     ('override_reason', 'agent_wrong', 'agent_wrong'),
     ('session_id', 's' * 128, 's' * 128),
@@ -44,7 +46,7 @@ def test_invalid_never_becomes_identity(kind, value):
 
 
 @pytest.mark.parametrize('kind,value', [
-    ('session_id', 'a:b'), ('actor', '@a'), ('review_id', 'Run'), ('finding_id', 'P0-1'),
+    ('session_id', 'a:b'), ('actor', '@a'), ('review_id', 'Run\n'), ('finding_id', 'P0-1\n'),
     ('source', 'interflux:interflux:fd-a'), ('source', 'review:fd-a'), ('source', 'fd-1'),
     ('source', 'fd-a_b'), ('source', 'fd-' + 'a' * 126), ('session_id', 's' * 129),
     ('override_reason', 'AGENT_WRONG'), ('finding_key', 'anything'),

@@ -45,9 +45,9 @@ source "$INTERSPECT_LIB"
 ## Finding Lookup and Recording
 
 Use a canonical lowercase `fd-*` agent name. Session identifiers are ASCII and
-case-insensitive; review and finding IDs must already be lowercase and match
-exactly. Do not silently lowercase a finding ID from a producer using another
-spelling: report that incompatible identity instead. Names and identities are
+case-insensitive; review and finding IDs preserve ASCII case and match
+exactly (including `P0-1` and ISO timestamp review IDs). Never lowercase them.
+Names and identities are
 asserted by the caller, not authenticated.
 
 When a correction references a finding, require its exact `findings.json` from
@@ -55,14 +55,25 @@ that run. Do not select the newest unrelated file. Python validates the original
 JSON, including duplicate keys and boolean types, before extraction. A missing
 file, failed lookup, ambiguous match or invalid classification is an error;
 never assume `low_confidence=false` after a lookup failure. A correction without
-any finding reference retains ordinary evidence behavior.
+any finding reference retains ordinary evidence behavior only when it is not
+flagged low-confidence. Preserve an explicit `low_confidence=true` from the
+correction input in `LOW_CONFIDENCE`; a flagged correction without a valid
+finding reference is refused, never retried without that flag.
 
 ```bash
 _interspect_ensure_db || exit 1
+# Check the sanitizer's status before constructing another command substitution.
+SANITIZED_DESCRIPTION=$(_interspect_sanitize "$DESCRIPTION") || {
+    echo "Correction not recorded: description rejected by sanitizer." >&2
+    exit 1
+}
 # FINDING_ID is empty for an ordinary correction without a finding reference.
-REQUEST=$(python3 "$_INTERSPECT_GATE_MODULE" shell-request \
-    description,finding_id,findings_path \
-    "$DESCRIPTION" "${FINDING_ID:-}" "${FINDINGS_JSON:-}") || exit 1
+REQUEST=$(python3 - "$SANITIZED_DESCRIPTION" "${FINDING_ID:-}" "${FINDINGS_JSON:-}" "${LOW_CONFIDENCE:-false}" <<'PY'
+import json, sys
+print(json.dumps(dict(description=sys.argv[1], finding_id=sys.argv[2],
+                     findings_path=sys.argv[3], low_confidence=json.loads(sys.argv[4]))))
+PY
+) || exit 1
 CONTEXT=$(printf '%s' "$REQUEST" | python3 "$_INTERSPECT_GATE_MODULE" correction-context) || {
     echo "Correction not recorded: finding lookup or identity validation failed." >&2
     exit 1

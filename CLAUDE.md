@@ -23,13 +23,17 @@ python3 -c "import json; json.load(open('hooks/hooks.json'))"           # Hooks 
 
 ### Low-confidence evidence gate
 
-Gate operations require Python 3.12+ and SQLite JSON1. Identity is asserted by
+Gate operations require Python 3.12+ and SQLite JSON1, including the persistent
+triggers. Initialization checks JSON1 even on the migration fast path and stops
+gate writes with a clear error if it is unavailable. Identity is asserted by
 callers, not authenticated: two invented session names can still corroborate.
 Direct database write access is trusted; triggers enforce row invariants, not
 provenance. Merge requires operator acceptance of that boundary.
 
 Raw JSON is validated before shell extraction. Sessions are ASCII lowercase;
-review/finding IDs must already be lowercase and match exactly. Canonical
+review/finding IDs preserve ASCII case and match exactly, including `P0-1` and
+`basename@2026-02-14T08:45:32Z`. Whitespace, controls, NUL and non-ASCII remain
+invalid. Canonical
 `gate_*` columns carry identities separately from diagnostic fields. Both lift
 modes use one parameterized UPDATE; automatic insertion and lift share one
 transaction. Missing run IDs use explicit `session` scope, with the original
@@ -41,14 +45,39 @@ keys remain version zero with NULL keys. Review affected overrides listed in
 `interspect_gate_override_review`; migration does not revert them. Failed
 migration stops gate writes. Old plugin copies cannot lift migrated rows.
 Gate statistics include flagged, corroborated, held and invalid/legacy-held counts.
+Base-era rows whose legacy `finding_key` is NULL stay permanently at version
+zero; neither lift path can corroborate them. Migration also catches agent rows
+whose column says false but whose context says true, or whose context cannot be
+strictly parsed. It prints the held-row count and a REVIEW REQUIRED override
+count. Audit records and override-review entries are retained on repeat repair.
+The v2 marker's `guard_revision` upgrades pre-fix guards transactionally; such
+an upgrade re-quarantines evidence and preserves valid canonical v2 identities.
+
+Disagreements honor an explicit true flag regardless of dismissal reason;
+missing classification is held and non-boolean flags are refused. Execution
+defects and kernel events also pass raw JSON through the Python bridge, honoring
+top-level and nested confidence flags before any shell extraction. Ordinary
+execution/kernel events may omit the flag. Flagged rows without a valid fd-agent,
+reason and finding tuple remain held at v0 (execution defects have no routing
+override reason; kernel telemetry has a `kernel-*` source). No alternate lift
+path exists. Non-agent shell, skill audit and harness writes do not use the
+agent flag/context guard. The harness writer currently emits `source_kind=memory`,
+which the production evidence CHECK already excludes; these changes do not
+alter that independent schema mismatch.
+
+Routing, overlay drafts, tune preconditions, auto-apply baselines, agent scores
+and effectiveness readers share `_interspect_eligible_sql`. Held rows remain
+visible in explicitly diagnostic gate statistics, never as eligible evidence.
 
 Before rollout, pause writers and rehearse on a consistent database copy outside
 git. Disable corroboration for rollback; with writers still paused, drop only
 the `interspect_gate_insert`/`interspect_gate_update` triggers and
 `interspect_gate_schema` marker, re-quarantine every low-confidence row and
 clear its corroboration timestamp/actor/mode in one transaction. Retain audit
-tables and do not resume old gate code or restore legacy lifts. A subsequent
-forward repair requires reviewed reconciliation, not automatic rerun.
+tables and do not resume old gate code or restore legacy lifts. After reviewed
+reconciliation, re-running the current migration is idempotent with retained
+audit tables: it re-quarantines rows, refreshes guards and writes the marker last.
+No audit-table cleanup or automatic restoration of old lifted states is needed.
 
 Verification: `bash tests/shell/test_low_confidence_gate.sh` and
 `cd tests && uv run pytest -q structural/test_gate_*.py`, followed by the full

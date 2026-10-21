@@ -70,11 +70,16 @@ def test_old_library_cannot_lift_migrated_database(db, tmp_path):
 def test_failed_migration_refuses_low_confidence_writes(db):
     with sqlite3.connect(db) as connection:
         connection.execute('DROP TABLE interspect_gate_schema')
-        # Existing audit table forces transactional migration failure partway.
+        # Inject a real migration failure; audit tables now survive rollback/rerun.
+        connection.execute('DROP TABLE interspect_gate_audit')
+        connection.execute('CREATE TABLE interspect_gate_audit (broken TEXT)')
+        connection.execute("INSERT INTO evidence(ts,session_id,seq,source,event,context,project,low_confidence,quarantine_until) "
+                           "VALUES ('2026-01-01','old',1,'fd-a','override','{}','test',1,4102444800)")
     result = shell(db, '_interspect_insert_evidence session-a fd-a override agent_wrong "$1" interspect-correction', row()['context'])
     assert result.returncode != 0
     with sqlite3.connect(db) as connection:
-        assert connection.execute('SELECT COUNT(*) FROM evidence').fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM evidence WHERE session_id<>'old'").fetchone()[0] == 0
+        assert connection.execute('SELECT SUM(corroborated_at) FROM evidence').fetchone()[0] == 0
 
 
 def test_unsupported_schema_ensure_does_not_partially_modify(tmp_path):

@@ -2,6 +2,7 @@
 # Regression coverage for the shared routing-calibration writer contract.
 
 set -uo pipefail
+export INTERSPECT_QUARANTINE_HOURS=0  # Fixtures are eligible calibration evidence.
 
 TEST_DIR=$(mktemp -d)
 trap 'rm -rf "$TEST_DIR"' EXIT

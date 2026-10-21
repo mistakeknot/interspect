@@ -79,7 +79,7 @@ If "Show evidence" is selected, for each proposed agent:
 ```bash
 local escaped
 escaped=$(_interspect_sql_escape "$agent")
-sqlite3 -separator '|' "$DB" "SELECT ts, override_reason, substr(context, 1, 200) FROM evidence WHERE source = '${escaped}' AND event = 'override' ORDER BY ts DESC LIMIT 5;"
+sqlite3 -separator '|' "$DB" "SELECT ts, override_reason, substr(context, 1, 200) FROM evidence WHERE source = '${escaped}' AND event = 'override' AND $(_interspect_eligible_sql) ORDER BY ts DESC LIMIT 5;"
 ```
 
 Format as human-readable summaries, then re-present the multi-select.

@@ -208,11 +208,23 @@ structural fixtures on `PYTHONPATH`.
 
 Gate identities are caller assertions, not authenticated sessions. Direct DB
 writers are trusted. Canonical `gate_*` columns and structured keys are separate
-from diagnostics; review/finding IDs must already be lowercase. Missing review
+from diagnostics; review/finding IDs preserve ASCII case and match exactly
+(including `P0-1` and ISO timestamp review IDs). Missing review
 identity uses explicit session scope, never a special `unscoped:` prefix.
 Migration audits and re-quarantines legacy lifts, holds invalid rows, and lists
 affected routing overrides for operator review. A migration error stops gate
 writes. See `CLAUDE.md` for rollout, rollback and trust-boundary acceptance.
+
+All agent producers pass confidence classification through the Python gate.
+Disagreement events honor explicit true flags for every dismissal; missing flags
+are held. Execution-defect and kernel consumers validate raw JSON before shell
+extraction and preserve top-level/nested flags; their flagged rows without a
+valid routing tuple stay held at v0. Persistent triggers reject agent flag/context
+mismatches. Non-agent shell and skill-audit writes remain independent; harness
+writes use `source_kind=memory`, which the existing production CHECK does not
+support (an independent schema mismatch, not a reason to relax gate guards).
+JSON1 is checked at startup. Base-era NULL finding keys are permanently v0;
+rollback retains audits, and a reviewed forward migration can reuse them.
 
 ```bash
 cd tests && uv run pytest -q
