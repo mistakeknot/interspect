@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression test for sylveste-3hyi: fresh-DB path must work under set -u.
+# Regression test: fresh-DB path must work under set -u.
 #
 # Bug: lib-interspect.sh:248-249 used $db (unset in _interspect_ensure_db scope)
 # instead of $_INTERSPECT_DB. Symptoms:

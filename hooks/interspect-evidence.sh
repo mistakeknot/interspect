@@ -36,7 +36,7 @@ fi
 # Ensure DB exists
 _interspect_ensure_db || exit 0
 
-# Skill evidence ingest (sylveste-7aj8.2): cheap incremental drain of the
+# Skill evidence ingest: cheap incremental drain of the
 # tool-invocation log into evidence + skill_signals. Fire-and-forget,
 # backgrounded — must never block or fail the hook. The watermark keeps
 # repeated runs cheap. Throttled to Skill PostToolUse events so we don't spawn

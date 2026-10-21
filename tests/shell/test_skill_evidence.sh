@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for sylveste-7aj8.2: skill-evidence ingestion adapter.
+# Tests: skill-evidence ingestion adapter.
 #
 # Verifies scripts/ingest-skill-audit.py drains Skill rows from either source
 # format into the evidence + skill_signals tables:
@@ -42,11 +42,11 @@ assert_eq() {
 
 TT_FIXTURE="$TEST_DIR/tooltime.jsonl"
 cat > "$TT_FIXTURE" <<'JSONL'
-{"v":1,"id":"sess-aaa-1","ts":"2026-06-01T10:00:00Z","event":"PostToolUse","tool":"Skill","project":"/home/mk/projects/Demarch","error":null,"source":"claude-code","skill":"interwatch:watch"}
-{"v":1,"id":"sess-aaa-2","ts":"2026-06-01T10:01:00Z","event":"PostToolUse","tool":"Skill","project":"/home/mk/projects/Demarch","error":null,"source":"claude-code","skill":"interpath:roadmap"}
-{"v":1,"id":"sess-bbb-5","ts":"2026-06-01T11:00:00Z","event":"PostToolUse","tool":"Skill","project":"/home/mk/projects/Sylveste","error":"boom","source":"claude-code","skill":"clavain:work"}
-{"v":1,"id":"sess-bbb-6","ts":"2026-06-01T11:01:00Z","event":"PostToolUse","tool":"Bash","project":"/home/mk/projects/Sylveste","error":null,"source":"claude-code"}
-{"v":1,"id":"sess-bbb-7","ts":"2026-06-01T11:02:00Z","event":"SessionStart","tool":"","project":"/home/mk/projects/Sylveste","error":null,"source":"claude-code"}
+{"v":1,"id":"sess-aaa-1","ts":"2026-06-01T10:00:00Z","event":"PostToolUse","tool":"Skill","project":"/work/projects/alpha","error":null,"source":"claude-code","skill":"interwatch:watch"}
+{"v":1,"id":"sess-aaa-2","ts":"2026-06-01T10:01:00Z","event":"PostToolUse","tool":"Skill","project":"/work/projects/alpha","error":null,"source":"claude-code","skill":"interpath:roadmap"}
+{"v":1,"id":"sess-bbb-5","ts":"2026-06-01T11:00:00Z","event":"PostToolUse","tool":"Skill","project":"/work/projects/beta","error":"boom","source":"claude-code","skill":"clavain:work"}
+{"v":1,"id":"sess-bbb-6","ts":"2026-06-01T11:01:00Z","event":"PostToolUse","tool":"Bash","project":"/work/projects/beta","error":null,"source":"claude-code"}
+{"v":1,"id":"sess-bbb-7","ts":"2026-06-01T11:02:00Z","event":"SessionStart","tool":"","project":"/work/projects/beta","error":null,"source":"claude-code"}
 JSONL
 # 3 Skill rows (2 success, 1 failure); 1 Bash + 1 SessionStart are non-Skill noise.
 
@@ -66,7 +66,7 @@ EV_SID=$(sqlite3 "$DB" "SELECT session_id FROM evidence WHERE source='interwatch
 assert_eq "session_id strips trailing -counter" "$EV_SID" "sess-aaa"
 
 EV_PROJ=$(sqlite3 "$DB" "SELECT project FROM evidence WHERE source='interwatch:watch';")
-assert_eq "project carried from tool-time row" "$EV_PROJ" "/home/mk/projects/Demarch"
+assert_eq "project carried from tool-time row" "$EV_PROJ" "/work/projects/alpha"
 
 SIG_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM skill_signals WHERE signal_kind='error';")
 assert_eq "3 error signals inserted" "$SIG_COUNT" "3"

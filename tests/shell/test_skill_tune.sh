@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for sylveste-7aj8.6/.7: skill tune overlays + canary + per-action autonomy.
+# Tests: skill tune overlays + canary + per-action autonomy.
 #
 # Mirrors the dual-mode pattern in test_tune_dual_mode.sh. Verifies:
 #   1. skill_canary_samples table exists after _interspect_ensure_db

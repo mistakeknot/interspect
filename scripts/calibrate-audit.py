@@ -15,7 +15,7 @@ docs/research/interspect-audit/{YYYY-QN}-calibration-audit.md.
 
 If no historical snapshot is old enough, exits 0 with a "bootstrap" report.
 
-Additionally (Sylveste-4b5.1 Phase-1 metrics emission): each run computes a
+Additionally (Phase-1 metrics emission): each run computes a
 consensus-trend point from interspect.db — agreement_rate, output_diversity,
 defect_escape_rate, evidence_n — and appends it as one JSON line to
 .clavain/interspect/consensus-trend.jsonl. This is retrospective-trend
@@ -121,7 +121,7 @@ def compute_consensus_trend_point(
 ) -> dict | None:
     """Compute one consensus-trend point from interspect.db evidence.
 
-    Definitions (Sylveste-4b5.1 Phase-1; see docs/research/interspect-audit/
+    Definitions (Phase-1; see docs/research/interspect-audit/
     2026-07-16-consensus-trap-phase1.md for full derivation + limitations):
 
       agreement_rate: among agent-sourced evidence rows in the window,
@@ -252,7 +252,7 @@ def append_consensus_trend(calibration_dir: Path, point: dict) -> Path:
 
 
 def render_consensus_trend_section(point: dict | None, trend_path: Path | None) -> list[str]:
-    lines = ["## Consensus-trend (Sylveste-4b5.1 Phase-1 metrics emission)", ""]
+    lines = ["## Consensus-trend (Phase-1 metrics emission)", ""]
     if point is None:
         lines += [
             "No interspect.db found — consensus-trend point not computed this run.",
@@ -374,8 +374,6 @@ def render_report(
         "(spot-check a few agents that moved). Old formula = the snapshot used "
         "as baseline; new formula = current.",
         "5. If reality shifted: this is signal, not noise — accept and move on.",
-        "",
-        "Source: Sylveste-xr3 / docs/research/flux-review/improve-toolchain-1d7a8b22/SYNTHESIS.md",
     ]
     return "\n".join(lines) + "\n"
 
@@ -407,7 +405,7 @@ def main() -> int:
 
     now = datetime.now(timezone.utc)
 
-    # Consensus-trend point (Sylveste-4b5.1 Phase-1): computed independent of
+    # Consensus-trend point (Phase-1): computed independent of
     # whether routing-calibration.json exists yet, since the metrics are
     # derived straight from evidence, not from the calibration artifact.
     trend_point = compute_consensus_trend_point(db_path, now, args.window_days)

@@ -28,7 +28,7 @@ source "${SCRIPT_DIR}/lib-interspect.sh"
 # Ensure DB
 _interspect_ensure_db || { echo "No interspect database found."; exit 0; }
 
-# ─── Collect Skill Signals (sylveste-7aj8.3) ─────────────────────────────────
+# ─── Collect Skill Signals ─────────────────────────────────
 # Normalize pending skill evidence into skill_signals before scoring. Each
 # collector is idempotent and fail-open; slow ones (bead_close, no_redirect,
 # tokens) skip gracefully when their data source is absent. Run synchronously

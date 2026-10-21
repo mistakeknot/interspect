@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for sylveste-7aj8.4: per-skill goal classifier.
+# Tests: per-skill goal classifier.
 #
 # Verifies scripts/infer-skill-goals.py classifies registered skills into
 # {speed, precision, completeness} goal weights in the skill_goals table,
@@ -198,7 +198,7 @@ assert_eq "--skill found exactly 1" \
     "$(echo "$OUT" | grep -o 'found=[0-9]*' | tail -1)" "found=1"
 
 echo ""
-echo "=== COMMAND discovery + classification (sylveste-7aj8.8) ==="
+echo "=== COMMAND discovery + classification ==="
 # Commands are SINGLE .md files in a commands/ dir (NOT a dir with SKILL.md).
 # Cache layout: <mkt>/<plugin>/<ver>/commands/<cmd>.md → <plugin>:<cmd>.
 # Flat layout:  <root>/commands/<cmd>.md (user/project) → bare <cmd>.
