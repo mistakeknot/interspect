@@ -63,6 +63,15 @@ evidence references are matched using SQLite INTEGER primary-key affinity, so
 Non-reference arrays/objects in an evidence-ID array do not abort reconciliation.
 These reports never automatically reverse an override.
 
+Revision 3 permanently holds pre-existing review identities with multiple `@`
+characters, including canonical v2 rows and legacy concatenated keys. Earlier
+generators could join `(a@b, c)` and `(a, b@c)` into the same ID. Stored rows do
+not retain enough provenance to distinguish explicit IDs from generated IDs, so
+repair conservatively clears their gate identities and usable keys while keeping
+diagnostics and audits. They cannot corroborate a new correction. Repeated repair
+also holds this shape; ordinary initialization at revision 3 is a read-only fast
+path. New generation still rejects `@` in basenames.
+
 Disagreements use `event_confidence()` to honor top-level or nested true flags
 regardless of dismissal reason, and reject malformed contexts/non-boolean flags.
 Missing top-level classification remains conservatively held. Execution
@@ -79,9 +88,19 @@ alter that independent schema mismatch.
 Routing, overlay drafts, tune preconditions, delegation outcomes, tool canaries,
 review/decomposition/plan calibration, agent scores and effectiveness readers
 share `_interspect_eligible_sql`. Python skill readers use its byte-equivalent
-`eligible_sql` counterpart, tested for parity. Skill signal scoring requires an
-eligible invocation row too. Held rows remain visible in raw diagnostics and
-gate-control scans, never as eligible evidence for learned decisions.
+`eligible_sql` counterpart, tested for parity. Skill scoring, tuning means/counts,
+overlay baselines and observed goal refinement use the shared
+`skill_signal_eligible_sql` / `_interspect_skill_signal_eligible_sql` predicate.
+It requires an eligible invocation matching the signal's invocation ID, skill
+and session. Zero eligible signals cannot generate an overlay body or refine
+goal weights. Canary samples have no session column, so their writer and readers
+join through the matching collected signal (invocation, skill, signal kind) to
+recover the full tuple. Samples without that relationship are ineligible.
+Evaluation and status progress recheck retained samples, including after a
+migration re-quarantines evidence; both counts and aggregates exclude them.
+Held rows remain visible in raw diagnostics and gate-control scans, never as
+eligible evidence for learned decisions. Prior derived weights/overlays still
+require operator reconciliation; filtering does not reconstruct their history.
 
 Before rollout, pause writers and rehearse on a consistent database copy outside
 git. Disable corroboration for rollback; with writers still paused, drop only

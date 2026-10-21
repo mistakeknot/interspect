@@ -364,8 +364,20 @@ def test_structured_finding_and_scope_joins_do_not_collide(db, delimiter, seed):
                              (json.dumps(context), scope + ':' + context['finding_id'], observed['id']))
         assert cli(db, 'migrate', {}).returncode == 0
         evidence = rows(db)
-        assert len({r['gate_key'] for r in evidence}) == 4
-        assert all(r['gate_version'] == 2 and r['corroborated_at'] == 0 for r in evidence)
+        usable_keys = []
+        for observed, context in zip(evidence, contexts):
+            # Legacy review IDs lack generator provenance: multiple @ signs
+            # could be the old ambiguous basename/timestamp join. Repair must
+            # discard these keys, even when this fixture used explicit IDs.
+            ambiguous = context.get('review_id', '').count('@') > 1
+            assert observed['corroborated_at'] == 0
+            assert observed['quarantine_until'] == 4102444800
+            if ambiguous:
+                assert observed['gate_version'] == 0 and observed['gate_key'] is None
+            else:
+                assert observed['gate_version'] == 2 and observed['gate_key'] is not None
+                usable_keys.append(observed['gate_key'])
+        assert len(set(usable_keys)) == len(usable_keys)
 
 
 @pytest.mark.parametrize('field', ['session_id', 'actor', 'source', 'override_reason', 'finding_key'])

@@ -68,7 +68,7 @@ If 0: "No tool-pattern evidence found for $TARGET."
 
 ```bash
 _interspect_validate_skill_name "$TARGET" || { echo "Invalid skill name"; exit 1; }
-SIGNAL_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM skill_signals WHERE skill_name = '$TARGET';" 2>/dev/null || echo "0")
+SIGNAL_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM skill_signals s WHERE skill_name = '$TARGET' AND $(_interspect_skill_signal_eligible_sql s);" 2>/dev/null || echo "0")
 INVS=$(_interspect_skill_invocation_count "$TARGET")
 HAS_GOALS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM skill_goals WHERE skill_name = '$TARGET';" 2>/dev/null || echo "0")
 ```

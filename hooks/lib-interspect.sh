@@ -692,6 +692,22 @@ _interspect_eligible_sql() {
     printf "(COALESCE(%squarantine_until,0) <= CAST(strftime('%%s','now') AS INTEGER) AND (%slow_confidence=0 OR (%slow_confidence=1 AND %sgate_version=2 AND %scorroborated_at>0 AND %squarantine_until=0)))" "$p" "$p" "$p" "$p" "$p" "$p"
 }
 
+# A derived signal needs the same eligible invocation, skill AND session.
+# Keep byte-identical to Python skill_signal_eligible_sql; alias is internal.
+_interspect_skill_signal_eligible_sql() {
+    local s="${1:-s}"
+    [[ "$s" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || return 1
+    printf "EXISTS (SELECT 1 FROM evidence e WHERE e.source_event_id=%s.invocation_id AND e.source=%s.skill_name AND e.session_id=%s.session_id AND e.source_kind='skill' AND e.event='skill_invocation' AND %s)" "$s" "$s" "$s" "$(_interspect_eligible_sql e)"
+}
+
+# Samples have no session column: recover it from the matching collected
+# signal, then require that signal's complete eligible invocation tuple.
+_interspect_skill_canary_eligible_sql() {
+    local c="${1:-c}"
+    [[ "$c" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || return 1
+    printf "EXISTS (SELECT 1 FROM skill_signals ss WHERE ss.invocation_id=%s.invocation_id AND ss.skill_name=%s.skill_name AND ss.signal_kind=%s.signal_kind AND %s)" "$c" "$c" "$c" "$(_interspect_skill_signal_eligible_sql ss)"
+}
+
 # Query all patterns and classify. Output: pipe-delimited rows.
 # Format: source|event|override_reason|event_count|session_count|project_count|classification
 _interspect_get_classified_patterns() {
@@ -5289,8 +5305,9 @@ _interspect_skill_signal_means() {
     local escaped; escaped=$(_interspect_sql_escape "$skill")
     sqlite3 -separator '|' "$db" "
         SELECT signal_kind, ROUND(AVG(value), 6)
-        FROM skill_signals
+        FROM skill_signals s
         WHERE skill_name = '${escaped}'
+          AND $(_interspect_skill_signal_eligible_sql s)
           AND observed_at > datetime('now', '-${window_days} days')
         GROUP BY signal_kind;
     " 2>/dev/null || true
@@ -5305,8 +5322,9 @@ _interspect_skill_invocation_count() {
     local escaped; escaped=$(_interspect_sql_escape "$skill")
     sqlite3 "$db" "
         SELECT COUNT(DISTINCT invocation_id)
-        FROM skill_signals
+        FROM skill_signals s
         WHERE skill_name = '${escaped}'
+          AND $(_interspect_skill_signal_eligible_sql s)
           AND observed_at > datetime('now', '-${window_days} days');
     " 2>/dev/null || echo 0
 }
@@ -5683,7 +5701,10 @@ _interspect_record_skill_canary_sample() {
     # value; this is a write, so nothing on stdout is meaningful to callers.
     _interspect_sqlite_write "$db" "INSERT OR IGNORE INTO skill_canary_samples
         (modification_id, skill_name, invocation_id, signal_kind, baseline_value, canary_value, per_signal_delta, observed_at)
-        VALUES (${mod_id}, '${e_skill}', '${e_inv}', '${e_sig}', ${base_sql}, ${value}, ${delta}, '${ts}');" >/dev/null
+        SELECT ${mod_id}, s.skill_name, s.invocation_id, s.signal_kind, ${base_sql}, ${value}, ${delta}, '${ts}'
+        FROM skill_signals s
+        WHERE s.skill_name='${e_skill}' AND s.invocation_id='${e_inv}' AND s.signal_kind='${e_sig}'
+          AND $(_interspect_skill_signal_eligible_sql s);" >/dev/null
 }
 
 # Evaluate a skill canary. Regression trigger (plan Task 7 Step 2): ANY individual
@@ -5702,7 +5723,7 @@ _interspect_evaluate_skill_canary() {
 
     # Need a minimum number of distinct invocations sampled before judging.
     local n_inv
-    n_inv=$(sqlite3 "$db" "SELECT COUNT(DISTINCT invocation_id) FROM skill_canary_samples WHERE modification_id = ${mod_id};" 2>/dev/null || echo 0)
+    n_inv=$(sqlite3 "$db" "SELECT COUNT(DISTINCT invocation_id) FROM skill_canary_samples c WHERE modification_id = ${mod_id} AND $(_interspect_skill_canary_eligible_sql c);" 2>/dev/null || echo 0)
     if (( n_inv < min_samples )); then
         echo "pending"; return 0
     fi
@@ -5712,8 +5733,9 @@ _interspect_evaluate_skill_canary() {
     local rows
     rows=$(sqlite3 -separator '|' "$db" "
         SELECT signal_kind, MAX(baseline_value), AVG(canary_value)
-        FROM skill_canary_samples
+        FROM skill_canary_samples c
         WHERE modification_id = ${mod_id}
+          AND $(_interspect_skill_canary_eligible_sql c)
         GROUP BY signal_kind;
     " 2>/dev/null)
     [[ -z "$rows" ]] && { echo "pending"; return 0; }

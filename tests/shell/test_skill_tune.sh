@@ -47,11 +47,23 @@ seed_signals() {
     local skill="$1" n="$2" nr="$3" tok="$4" err="$5"
     local i
     for i in $(seq 1 "$n"); do
+        sqlite3 "$DB" "INSERT INTO evidence (ts,session_id,seq,source,event,context,project,source_kind,source_event_id,quarantine_until)
+          VALUES (datetime('now'),'s$i',1,'$skill','skill_invocation','{}','','skill','${skill//:/_}-inv$i',0);"
         sqlite3 "$DB" "INSERT INTO skill_signals (skill_name,session_id,invocation_id,signal_kind,value,observed_at) VALUES
           ('$skill','s$i','${skill//:/_}-inv$i','no_redirect',$nr,datetime('now')),
           ('$skill','s$i','${skill//:/_}-inv$i','tokens',$tok,datetime('now')),
           ('$skill','s$i','${skill//:/_}-inv$i','error',$err,datetime('now'));"
     done
+}
+
+# Canary samples refer to collected signals and their eligible invocation tuple.
+seed_canary_invocation() {
+    local skill="$1" invocation="$2" nr="$3" tok="$4"
+    sqlite3 "$DB" "INSERT INTO evidence (ts,session_id,seq,source,event,context,project,source_kind,source_event_id,quarantine_until)
+      VALUES (datetime('now'),'$invocation',1,'$skill','skill_invocation','{}','','skill','$invocation',0);
+      INSERT INTO skill_signals (skill_name,session_id,invocation_id,signal_kind,value,observed_at) VALUES
+      ('$skill','$invocation','$invocation','no_redirect',$nr,datetime('now')),
+      ('$skill','$invocation','$invocation','tokens',$tok,datetime('now'));"
 }
 
 echo "=== Group 1: schema ==="
@@ -124,6 +136,7 @@ echo ""
 echo "=== Group 8: canary regression → auto-revert ==="
 # baseline 0.8 → canary 0.5 (no_redirect −37%), 0.55 (tokens −31%); composite ~−34%
 for i in $(seq 1 5); do
+    seed_canary_invocation "clavain:lint" "creg$i" "0.5" "0.55"
     _interspect_record_skill_canary_sample "$MOD" "clavain:lint" "creg$i" "no_redirect" "0.8" "0.5" >/dev/null
     _interspect_record_skill_canary_sample "$MOD" "clavain:lint" "creg$i" "tokens" "0.8" "0.55" >/dev/null
 done
@@ -140,6 +153,7 @@ KC=$(_interspect_generate_skill_overlay "clavain:keep" "tighten_description")
 OUT2=$(_interspect_write_skill_overlay "clavain:keep" "tighten_description" "$KC" "[]")
 MOD2=$(echo "$OUT2" | sed -n 's/.*modification_id=\([0-9]*\).*/\1/p')
 for i in $(seq 1 5); do
+    seed_canary_invocation "clavain:keep" "cok$i" "0.71" "0.72"
     _interspect_record_skill_canary_sample "$MOD2" "clavain:keep" "cok$i" "no_redirect" "0.7" "0.71" >/dev/null
     _interspect_record_skill_canary_sample "$MOD2" "clavain:keep" "cok$i" "tokens" "0.7" "0.72" >/dev/null
 done

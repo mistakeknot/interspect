@@ -88,7 +88,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from routing_calibration_writer import CalibrationWriteError, merge_calibration
-from interspect_gate import eligible_sql
+from interspect_gate import eligible_sql, skill_signal_eligible_sql
 
 
 # ─── Repo-root / DB discovery (mirrors ingest-skill-audit.py) ────────────────
@@ -313,10 +313,7 @@ def signal_rows(
         "SELECT s.signal_kind, s.value, s.observed_at "
         "FROM skill_signals s "
         "WHERE s.skill_name = ? AND s.observed_at >= ? "
-        "AND EXISTS (SELECT 1 FROM evidence e "
-        "WHERE e.source_event_id=s.invocation_id AND e.source=s.skill_name "
-        "AND e.session_id=s.session_id AND e.source_kind='skill' "
-        f"AND e.event='skill_invocation' AND {eligible_sql('e')})",
+        f"AND {skill_signal_eligible_sql('s')}",
         (skill_name, lower_bound),
     ).fetchall()
     out: list[SignalRow] = []

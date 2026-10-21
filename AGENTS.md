@@ -215,6 +215,11 @@ Generated `basename@timestamp` review IDs reject `@` in the basename so their
 component boundary is unique; explicit review/finding IDs still allow `:` and `@`.
 Migration audits and re-quarantines legacy lifts, holds invalid rows, and lists
 all previously eligible rows it holds, including expired context-only flags.
+Guard revision 3 also permanently holds pre-existing review IDs containing more
+than one `@`: earlier generators did not preserve a unique basename/timestamp
+boundary. These rows retain diagnostics/audits but no usable corroboration key,
+even if the ID was explicit. New unambiguous generation remains supported;
+re-running a repair conservatively holds this shape again.
 Override reconciliation uses SQLite integer-ID affinity (including string IDs)
 and retained audits, reports affected overrides, and never reverses them.
 A migration error stops gate
@@ -234,6 +239,13 @@ rollback retains audits, and a reviewed forward migration can reuse them.
 Delegation, tool canary, review/decomposition/plan calibration, and skill signal
 readers enforce both ordinary quarantine and corroboration eligibility. Python
 `eligible_sql` mirrors `_interspect_eligible_sql`, with executable parity tests.
+Skill scoring, tuning, invocation counts, baselines and goal refinement share
+`skill_signal_eligible_sql` / `_interspect_skill_signal_eligible_sql`: the backing
+evidence must match invocation ID, skill and session. No eligible signals means
+no overlay body and no refined goal weights. Canary sample creation requires a
+matching collected signal with eligible evidence; evaluation and status recheck
+that relationship so later quarantine or migration excludes retained samples
+from counts and averages. Samples without a matching signal are ineligible.
 Raw diagnostic counts and gate-control scans intentionally retain held rows.
 
 ```bash

@@ -116,6 +116,12 @@ db = sys.argv[1]
 conn = sqlite3.connect(db)
 for i in range(25):
     conn.execute(
+        "INSERT INTO evidence (ts,session_id,seq,source,event,context,project,"
+        "source_kind,source_event_id,quarantine_until) "
+        "VALUES ('2026-06-19T00:00:00Z',?,1,'clavain:work','skill_invocation','{}','',"
+        "'skill',?,0)", (f"sess-{i}", f"inv-{i}"),
+    )
+    conn.execute(
         "INSERT INTO skill_signals "
         "(skill_name, session_id, invocation_id, signal_kind, value, raw_value, observed_at) "
         "VALUES ('clavain:work', ?, ?, 'bead_close', 1.0, 1.0, '2026-06-19T00:00:00Z')",

@@ -240,6 +240,7 @@ SKILL_CANARIES=$(sqlite3 -separator ' | ' "$DB" "
          ROUND(AVG(s.per_signal_delta), 3) AS mean_delta
   FROM skill_canary_samples s
   JOIN modifications m ON m.id = s.modification_id AND m.status = 'applied'
+  WHERE $(_interspect_skill_canary_eligible_sql s)
   GROUP BY s.skill_name;")
 
 # Scored skills (if a calibration has been written)

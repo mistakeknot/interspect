@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 SENTINEL = 4102444800
 REASONS = ('agent_wrong', 'deprioritized', 'already_fixed', 'stale_finding',
            'not_applicable', 'severity_miscalibrated')
-GUARD_REVISION = 2
+GUARD_REVISION = 3
 
 
 class GateDependencyError(RuntimeError):
@@ -34,6 +34,19 @@ def eligible_sql(alias=''):
     return (f"(COALESCE({p}quarantine_until,0) <= CAST(strftime('%s','now') AS INTEGER) "
             f"AND ({p}low_confidence=0 OR ({p}low_confidence=1 AND {p}gate_version=2 "
             f"AND {p}corroborated_at>0 AND {p}quarantine_until=0)))")
+
+
+def skill_signal_eligible_sql(alias='s'):
+    """A derived signal needs the same eligible invocation, skill AND session.
+
+    Byte-identical to _interspect_skill_signal_eligible_sql. Aliases are internal.
+    """
+    if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', alias) is None:
+        raise ValueError('invalid SQL alias')
+    return ("EXISTS (SELECT 1 FROM evidence e "
+            f"WHERE e.source_event_id={alias}.invocation_id AND e.source={alias}.skill_name "
+            f"AND e.session_id={alias}.session_id AND e.source_kind='skill' "
+            f"AND e.event='skill_invocation' AND {eligible_sql('e')})")
 
 
 def require_json1(db):
@@ -310,6 +323,13 @@ def migrate(db, overrides_path=None):
                     legacy_scope = context['review_id'] if 'review_id' in context else 'unscoped:' + row['session_id']
                     if legacy_scope + ':' + context['finding_id'] != row['finding_key']:
                         raise ValueError('legacy key disagrees with context')
+                # Older generators joined basename and timestamp with @ but
+                # allowed @ in both components. Neither canonical v2 columns
+                # nor legacy context retain provenance that can disambiguate
+                # a@b@c. Hold even explicit IDs with this shape on repair;
+                # diagnostics/audits must never resurrect their witness key.
+                if candidate['gate_scope'] == 'review' and candidate['gate_scope_id'].count('@') > 1:
+                    raise ValueError('ambiguous previous generated review identity')
                 candidate['gate_key'] = finding_key(db, candidate['gate_scope'], candidate['gate_scope_id'], candidate['gate_finding_id'])
                 fields = candidate
             except (ValueError, TypeError, KeyError):

@@ -95,6 +95,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, NamedTuple
 
+from interspect_gate import skill_signal_eligible_sql
+
 
 # ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -611,13 +613,14 @@ SIGNAL_GOAL_MAP = {
 
 
 def observed_mix(conn: sqlite3.Connection, skill_name: str) -> tuple[dict[str, float], int]:
-    """Aggregate skill_signals into a normalized goal mix + the total signal count.
+    """Aggregate eligible skill signals into a goal mix and eligible count.
 
     Sums each signal's `value` into its mapped goal, then renormalizes across the
     three goals. Returns ({}, n) when no mapped signal mass exists.
     """
     rows = conn.execute(
-        "SELECT signal_kind, value FROM skill_signals WHERE skill_name = ?",
+        "SELECT signal_kind, value FROM skill_signals s WHERE skill_name = ? "
+        f"AND {skill_signal_eligible_sql('s')}",
         (skill_name,),
     ).fetchall()
     total_rows = len(rows)
