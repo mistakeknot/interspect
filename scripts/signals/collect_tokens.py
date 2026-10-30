@@ -53,6 +53,11 @@ from _common import (  # noqa: E402
 
 SIGNAL_KIND = "tokens"
 
+# Bounds on one catch-up pass. Transcript token totals are cached by
+# (path, size, mtime), so each pass only parses new or changed transcripts.
+MAX_TRANSCRIPT_BYTES = int(os.environ.get("INTERSPECT_MAX_TRANSCRIPT_BYTES") or 256 * 1024 * 1024)
+MAX_NEW_TRANSCRIPTS = int(os.environ.get("INTERSPECT_MAX_NEW_TRANSCRIPTS") or 150)
+
 
 def _parse_ts_ms(value: str | None) -> int | None:
     if not value:
@@ -160,6 +165,31 @@ def transcript_tokens(path: Path) -> int | None:
     return total if found else None
 
 
+def _load_cache(path: Path | None) -> dict:
+    if path is None:
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_cache(path: Path | None, cache: dict, live: set[str]) -> None:
+    if path is None:
+        return
+    pruned = {k: v for k, v in cache.items() if k in live}
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(pruned), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def session_id_from_path(source_path: str) -> str:
     """Top-level transcript filename stem == session_id. Subagent files differ."""
     return Path(source_path).stem
@@ -196,6 +226,7 @@ def collect(
     limit: int | None,
     window_days: int,
     min_cohort: int,
+    cache_path: Path | None = None,
 ) -> dict[str, int]:
     stats = {
         "pending": 0,
@@ -204,6 +235,7 @@ def collect(
         "skipped_no_cohort": 0,
         "skipped_dup": 0,
         "cass_unavailable": 0,
+        "deferred_indexing": 0,
     }
 
     if not cass_available():
@@ -229,6 +261,10 @@ def collect(
 
     # Index sessions: session_id → (workspace_key, started_ms, token_cost).
     sess_index: dict[str, tuple[str, int, int]] = {}
+    cache = _load_cache(cache_path)
+    live: set[str] = set()
+    parsed_new = 0
+    index_incomplete = False
     for s in sessions:
         sp = s.get("source_path")
         if not isinstance(sp, str):
@@ -239,10 +275,35 @@ def collect(
         started = s.get("started_at")
         if not isinstance(started, int):
             continue
-        toks = transcript_tokens(Path(sp))
+        try:
+            st = Path(sp).stat()
+        except OSError:
+            continue
+        if st.st_size > MAX_TRANSCRIPT_BYTES:
+            continue
+        key = sp
+        sig = [st.st_size, int(st.st_mtime)]
+        live.add(key)
+        hit = cache.get(key)
+        if isinstance(hit, dict) and hit.get("sig") == sig:
+            toks = hit.get("tokens")
+        else:
+            if parsed_new >= MAX_NEW_TRANSCRIPTS:
+                index_incomplete = True
+                continue
+            parsed_new += 1
+            toks = transcript_tokens(Path(sp))
+            cache[key] = {"sig": sig, "tokens": toks}
         if toks is None:
             continue
         sess_index[sid] = (workspace_from_path(sp), started, toks)
+    if not dry_run:
+        _save_cache(cache_path, cache, live)
+    if index_incomplete:
+        # A partial index would skew baselines; write nothing, resume next pass.
+        stats["deferred_indexing"] = len(pending)
+        log("collect_tokens: transcript index incomplete — deferring to next pass")
+        return stats
 
     # Which sessions ran this skill (from interspect evidence) — to exclude from
     # the skill's own baseline cohort.
@@ -342,6 +403,7 @@ def main() -> int:
             limit=args.limit,
             window_days=args.window_days,
             min_cohort=args.min_cohort,
+            cache_path=db_path.with_name(db_path.name + ".tokens-cache.json"),
         )
         if not args.dry_run:
             conn.commit()

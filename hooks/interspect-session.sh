@@ -90,8 +90,18 @@ if command -v python3 &>/dev/null; then
             _LOWPRI=()
             command -v nice &>/dev/null && _LOWPRI+=(nice -n 19)
             command -v ionice &>/dev/null && _LOWPRI=(ionice -c 3 ${_LOWPRI[@]+"${_LOWPRI[@]}"})
+            # Bounds per collector: wall-clock timeout and a virtual-memory cap
+            # (a runaway pass is killed rather than starving the host). Both
+            # tunable; set to 0 to disable.
+            _TMO="${INTERSPECT_COLLECT_TIMEOUT:-300}"
+            _MEM="${INTERSPECT_COLLECT_MEM_KB:-2097152}"
+            [[ "$_MEM" =~ ^[0-9]+$ && "$_MEM" -gt 0 ]] && ulimit -v "$_MEM" 2>/dev/null
+            _TMOCMD=()
+            if [[ "$_TMO" =~ ^[0-9]+$ && "$_TMO" -gt 0 ]] && command -v timeout &>/dev/null; then
+                _TMOCMD=(timeout -k 10 "$_TMO")
+            fi
             for _c in collect_bead_close collect_no_redirect collect_tokens; do
-                ${_LOWPRI[@]+"${_LOWPRI[@]}"} python3 "${_SIGNALS_DIR}/${_c}.py" \
+                ${_LOWPRI[@]+"${_LOWPRI[@]}"} ${_TMOCMD[@]+"${_TMOCMD[@]}"} python3 "${_SIGNALS_DIR}/${_c}.py" \
                     --db "$_INTERSPECT_DB" --limit 200 >/dev/null 2>&1 || true
             done
         ) &

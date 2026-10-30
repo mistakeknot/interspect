@@ -43,6 +43,8 @@ from _common import (  # noqa: E402
 
 SIGNAL_KIND = "no_redirect"
 DEFAULT_PROJECTS_DIR = "~/.claude/projects"
+# Transcripts larger than this are skipped, not read (memory/time bound).
+MAX_TRANSCRIPT_BYTES = int(os.environ.get("INTERSPECT_MAX_TRANSCRIPT_BYTES") or 256 * 1024 * 1024)
 
 # Case-insensitive, word-boundary redirect markers. Each pattern matched once
 # per user turn (presence, not frequency) so a turn contributes at most 1.
@@ -117,63 +119,67 @@ def score_followup(
     markers. Fall back to the invocation ts if the block isn't found.
     """
     try:
-        lines = transcript.read_text(encoding="utf-8", errors="replace").splitlines()
+        if transcript.stat().st_size > MAX_TRANSCRIPT_BYTES:
+            log(f"collect_no_redirect: {transcript.name} over size cap — skipping")
+            return None
+        fh = transcript.open("r", encoding="utf-8", errors="replace")
     except OSError:
         return None
 
-    records = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    # Single streaming pass; never holds the whole transcript in memory.
+    # primary = user turns after the Skill tool_use block; fallback = user turns
+    # after the first record stamped at/after the invocation ts. Stops as soon
+    # as the primary window is full.
+    primary: list[str] | None = None
+    fallback: list[str] | None = None
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
-    # 1) Find the invocation index via the Skill tool_use block.
-    start_idx = None
-    for i, obj in enumerate(records):
-        if obj.get("type") != "assistant":
-            continue
-        msg = obj.get("message") or {}
-        for block in msg.get("content") or []:
-            if (
-                isinstance(block, dict)
-                and block.get("type") == "tool_use"
-                and block.get("name") == "Skill"
-            ):
-                inp = block.get("input") or {}
-                if inp.get("skill") == skill_name:
-                    start_idx = i
-                    break
-        if start_idx is not None:
-            break
+            if primary is not None or fallback is not None:
+                if (
+                    obj.get("type") == "user"
+                    and not obj.get("isMeta")
+                    and not obj.get("isSidechain")
+                ):
+                    text = _user_text(obj.get("message"))
+                    if text is not None:
+                        if primary is not None and len(primary) < max_turns:
+                            primary.append(text)
+                        if fallback is not None and len(fallback) < max_turns:
+                            fallback.append(text)
+                        if primary is not None and len(primary) >= max_turns:
+                            break
 
-    # 2) Fallback: first record whose timestamp is >= the invocation ts.
-    if start_idx is None and invocation_ts:
-        for i, obj in enumerate(records):
-            ts = obj.get("timestamp")
-            if isinstance(ts, str) and ts >= invocation_ts:
-                start_idx = i
-                break
+            if primary is None and obj.get("type") == "assistant":
+                for block in (obj.get("message") or {}).get("content") or []:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_use"
+                        and block.get("name") == "Skill"
+                        and (block.get("input") or {}).get("skill") == skill_name
+                    ):
+                        primary = []
+                        break
+                if primary is not None:
+                    continue
 
-    if start_idx is None:
+            if fallback is None and invocation_ts:
+                ts = obj.get("timestamp")
+                if isinstance(ts, str) and ts >= invocation_ts:
+                    fallback = []
+
+    turn_texts = primary if primary is not None else fallback
+    if turn_texts is None:
         return None
-
-    # 3) Examine the next user text turns after the invocation.
-    turns_examined = 0
-    redirect_markers = 0
-    for obj in records[start_idx + 1 :]:
-        if obj.get("type") != "user" or obj.get("isMeta") or obj.get("isSidechain"):
-            continue
-        text = _user_text(obj.get("message"))
-        if text is None:
-            continue
-        turns_examined += 1
-        redirect_markers += count_redirects(text)
-        if turns_examined >= max_turns:
-            break
+    turns_examined = len(turn_texts)
+    redirect_markers = sum(count_redirects(t) for t in turn_texts)
 
     if turns_examined == 0:
         # No user turn followed (e.g. session ended on the skill). Treat as a
