@@ -190,6 +190,12 @@ def _save_cache(path: Path | None, cache: dict, live: set[str]) -> None:
             pass
 
 
+def _signature(path: Path) -> list[int]:
+    """Cache signature: size + mtime in ns (whole seconds would miss rewrites)."""
+    st = path.stat()
+    return [st.st_size, st.st_mtime_ns]
+
+
 def session_id_from_path(source_path: str) -> str:
     """Top-level transcript filename stem == session_id. Subagent files differ."""
     return Path(source_path).stem
@@ -282,7 +288,7 @@ def collect(
         if st.st_size > MAX_TRANSCRIPT_BYTES:
             continue
         key = sp
-        sig = [st.st_size, int(st.st_mtime)]
+        sig = [st.st_size, st.st_mtime_ns]
         live.add(key)
         hit = cache.get(key)
         if isinstance(hit, dict) and hit.get("sig") == sig:

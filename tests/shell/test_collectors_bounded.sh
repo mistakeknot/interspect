@@ -60,5 +60,25 @@ PY
 [[ "$(echo "$R" | sed -n 1p)" == "12" ]] && ok "cache round-trips" || bad "cache round-trip: $R"
 [[ "$(echo "$R" | sed -n 2p)" == "0" ]] && ok "cache prunes dead transcripts" || bad "cache not pruned: $R"
 
+echo "=== tokens cache signature is ns-resolution ==="
+R=$(python3 -I - "$SRC_DIR/scripts/signals" "$TEST_DIR" <<'PY'
+import sys, os, json
+sys.path.insert(0, sys.argv[1])
+import collect_tokens as c
+from pathlib import Path
+d = Path(sys.argv[2])
+p = d / "u.jsonl"
+def write(n):
+    p.write_text(json.dumps({"type":"assistant","message":{"usage":{"input_tokens":n,"output_tokens":0}}}) + "\n")
+write(10)
+os.utime(p, ns=(1_700_000_000_000_000_000, 1_700_000_000_100_000_000))
+a = c._signature(p)
+write(90)  # same size, same whole second, different ns
+os.utime(p, ns=(1_700_000_000_000_000_000, 1_700_000_000_900_000_000))
+print("differs" if a != c._signature(p) else "same")
+PY
+)
+[[ "$R" == "differs" ]] && ok "same-second rewrite changes the signature" || bad "signature collides: $R"
+
 echo; echo "Passed: $PASS  Failed: $FAIL"
 [[ $FAIL -eq 0 ]]
