@@ -16,6 +16,7 @@ import argparse
 import datetime as dt
 import json
 import pathlib
+import subprocess
 import sys
 
 from . import core, driver
@@ -91,12 +92,11 @@ def cmd_aggregate(a) -> int:
 def cmd_run(a) -> int:
     now = core.parse_time(a.run_at)
     out_root = pathlib.Path(a.out_root)
-    workdir = out_root / "judge-workdir"
-    workdir.mkdir(parents=True, exist_ok=True)
+    out_root.mkdir(parents=True, exist_ok=True)
     index = driver.TextIndex([pathlib.Path(r) for r in a.text_root])
     env = driver.Env(
         evidence=driver.make_real_evidence(index),
-        dispatch=driver.make_real_dispatch(workdir, pathlib.Path(a.clavain_root),
+        dispatch=driver.make_real_dispatch(pathlib.Path(a.clavain_root),
                                            pathlib.Path(a.decision_context), pathlib.Path(a.ledger)),
         quota=driver.real_quota,
         now=lambda: now)
@@ -109,6 +109,9 @@ def cmd_run(a) -> int:
     except driver.Paused as exc:
         print(f"paused: {exc}; rerun to resume", file=sys.stderr)
         return 3
+    except (RuntimeError, subprocess.TimeoutExpired) as exc:
+        print(f"judge dispatch failed: {exc}; finished calls are kept, rerun to resume", file=sys.stderr)
+        return 4
     print(json.dumps(summary, sort_keys=True))
     return 0
 

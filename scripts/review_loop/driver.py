@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import fcntl
+import hashlib
 import json
+import math
 import pathlib
 import random
 import re
@@ -47,21 +50,33 @@ def latest_ready_week(run_at: dt.datetime) -> str:
     return core.iso_week(run_at - dt.timedelta(days=core.HORIZON_DAYS + 7))
 
 
+def _utilization(value) -> float | None:
+    """A usable reading is a finite number in [0, 1]. Booleans, NaN, negatives
+    and anything else are unknown, and unknown is not headroom."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0 or value > 1:
+        return None
+    return float(value)
+
+
 def quota_gate(accounts: list[dict], threshold: float = QUOTA_THRESHOLD) -> tuple[bool, str]:
-    """Refuse when no enabled account has headroom in every limit window it
-    reports. An account that reports no reading is treated as unknown, and
-    unknown is not headroom."""
+    """Refuse when no account that is explicitly enabled has headroom in every
+    limit window it reports. A missing or malformed reading is unknown."""
     best = None
-    for a in accounts:
-        if not a.get("enabled", True):
+    for a in accounts if isinstance(accounts, list) else []:
+        if not isinstance(a, dict) or a.get("enabled") is not True:
             continue
-        windows = [w.get("utilization") for w in a.get("limitWindows") or []]
-        if not windows or any(u is None for u in windows):
+        raw = a.get("limitWindows")
+        if not isinstance(raw, list) or not raw:
+            continue
+        windows = [_utilization(w.get("utilization")) if isinstance(w, dict) else None for w in raw]
+        if any(u is None for u in windows):
             continue
         peak = max(windows)
         best = peak if best is None else min(best, peak)
     if best is None:
-        return False, "no enabled account reports a quota reading"
+        return False, "no enabled account reports a valid quota reading"
     if best >= threshold:
         return False, f"least-used account is at {best:.0%} of a limit window (threshold {threshold:.0%})"
     return True, f"least-used account is at {best:.0%}"
@@ -71,6 +86,8 @@ def sanitize(text: str, limit: int) -> str:
     """Untrusted text goes into prompts as data: neutralise fence and comment
     markers that the dispatcher or a reader could mistake for structure."""
     text = text.replace("```", "'''").replace("~~~", "---").replace("<!--", "<!- -").replace("-->", "- ->")
+    # structure the driver and the judge reply format rely on must not appear in data
+    text = text.replace("JUDGMENT_JSON", "JUDGMENT-JSON").replace("--- receipt", "-- - receipt")
     raw = text.encode("utf-8")
     if len(raw) > limit:
         text = raw[:limit].decode("utf-8", "ignore") + "\n[truncated]"
@@ -141,7 +158,7 @@ def _try_judge(env: Env, prompt: str, reviewer: str, tag: str, log: list[dict]) 
     so the receipts concerned stay unresolved instead of stopping the week."""
     try:
         return _call_judge(env, prompt, reviewer, tag, log)
-    except ValueError as exc:
+    except (ValueError, TypeError, AttributeError, KeyError) as exc:
         log.append({"tag": tag, "unparseable": str(exc)[:200]})
         return None
 
@@ -152,86 +169,118 @@ def _outcome_of(r: dict) -> str:
     return core.receipt_outcome(r.get("findings", []), bool(r.get("partial")))
 
 
-def judge_pr(env: Env, s: dict, frame_blocks: dict, log: list[dict]) -> tuple[dict, dict, int]:
+def _unresolved(rd: int, reason: str, recovered: bool = True) -> dict:
+    return {"round": rd, "partial": True, "unresolved_reason": reason, "text_recovered": recovered,
+            "findings": [], "driver_unresolved": True}
+
+
+def _noop(*_a) -> None:
+    return None
+
+
+def judge_pr(env: Env, s: dict, frame_blocks: dict, log: list[dict], part: dict | None = None,
+             save: Callable[[], None] = _noop) -> tuple[dict, dict, int]:
     """Judge every BLOCK round of one sampled PR. Returns (stage_a, stage_b,
-    outcome_induced_changes)."""
+    outcome_induced_changes). ``part`` holds finished stages (keyed by round) so
+    a pause between calls loses nothing. Rounds are batched per reviewer lab, so
+    each batch has a judge on a different lab from its own reviewer. Stage B
+    never inherits Stage A's findings: a missing Stage B judgment is recorded as
+    unresolved."""
     pr = s["pr"]
+    part = part if part is not None else {}
+    done_a, done_b = part.setdefault("a", {}), part.setdefault("b", {})
     blocks = {b["round"]: b for b in frame_blocks[pr]}
-    reviewer = blocks[s["rounds"][0]]["reviewer"]
     evid = {rd: env.evidence(pr, blocks[rd]) for rd in s["rounds"]}
-    a_out, b_out, judged = [], [], []
+    groups: dict[str, list[int]] = {}
     for rd in s["rounds"]:
         if not evid[rd].get("text"):
-            skip = {"round": rd, "partial": True, "unresolved_reason": "text_unrecovered",
-                    "text_recovered": False, "findings": []}
-            a_out.append(skip)
-            b_out.append(dict(skip))
+            done_a[str(rd)] = _unresolved(rd, "text_unrecovered", recovered=False)
+            done_b[str(rd)] = _unresolved(rd, "text_unrecovered", recovered=False)
         else:
-            judged.append(rd)
+            groups.setdefault(core.lab_of(blocks[rd]["reviewer"]), []).append(rd)
+    for lab, rounds in groups.items():
+        reviewer = blocks[rounds[0]]["reviewer"]
+        suffix = "" if len(groups) == 1 else f":{lab}"
+        if not all(str(rd) in done_a for rd in rounds):
+            recs = [_receipt_block(rd, blocks[rd]["head"], evid[rd], stage_b=False, stage_a=None) for rd in rounds]
+            ja = _try_judge(env, stage_prompt(pr, recs, outcome_aware=False), reviewer, f"A:{pr}{suffix}", log)
+            by_a = {r["round"]: r for r in ja["receipts"]} if ja else {}
+            for rd in rounds:
+                r = by_a.get(rd) or _unresolved(rd, "no_judgment" if ja else "judge_unparseable")
+                done_a[str(rd)] = dict(r, round=rd, text_recovered=True)
+            save()
+        if not all(str(rd) in done_b for rd in rounds):
+            if all(done_a[str(rd)].get("driver_unresolved") for rd in rounds):
+                for rd in rounds:
+                    done_b[str(rd)] = _unresolved(rd, "stage_a_unavailable")
+            else:
+                recs = [_receipt_block(rd, blocks[rd]["head"], evid[rd], stage_b=True, stage_a=done_a[str(rd)])
+                        for rd in rounds]
+                jb = _try_judge(env, stage_prompt(pr, recs, outcome_aware=True), reviewer, f"B:{pr}{suffix}", log)
+                by_b = {r["round"]: r for r in jb["receipts"]} if jb else {}
+                for rd in rounds:
+                    r = by_b.get(rd) or _unresolved(rd, "no_judgment" if jb else "judge_unparseable")
+                    done_b[str(rd)] = dict(r, round=rd, text_recovered=True)
+            save()
     changes = 0
-    if judged:
-        recs_a = [_receipt_block(rd, blocks[rd]["head"], evid[rd], stage_b=False, stage_a=None) for rd in judged]
-        ja = _try_judge(env, stage_prompt(pr, recs_a, outcome_aware=False), reviewer, f"A:{pr}", log)
-        by_a = {r["round"]: r for r in ja["receipts"]} if ja else {}
-        for rd in judged:
-            r = by_a.get(rd, {"round": rd, "partial": True, "findings": [],
-                              "unresolved_reason": "no_judgment" if ja else "judge_unparseable"})
-            r = dict(r, round=rd, text_recovered=True)
-            a_out.append(r)
-        recs_b = [_receipt_block(rd, blocks[rd]["head"], evid[rd], stage_b=True, stage_a=by_a.get(rd))
-                  for rd in judged]
-        jb = _try_judge(env, stage_prompt(pr, recs_b, outcome_aware=True), reviewer, f"B:{pr}", log) if ja else None
-        by_b = {r["round"]: r for r in jb["receipts"]} if jb else {}
-        for rd in judged:
-            rb = dict(by_b.get(rd) or by_a.get(rd) or {"round": rd, "partial": True, "findings": []},
-                      round=rd, text_recovered=True)
-            ra = next(x for x in a_out if x["round"] == rd)
-            if _outcome_of(ra) != _outcome_of(rb):
-                rb["outcome_induced_change"] = True
-                changes += 1
-            b_out.append(rb)
+    for rd in s["rounds"]:
+        rb, ra = done_b[str(rd)], done_a[str(rd)]
+        if not rb.get("driver_unresolved") and not ra.get("driver_unresolved") and _outcome_of(ra) != _outcome_of(rb):
+            rb["outcome_induced_change"] = True
+            changes += 1
     key = lambda r: r["round"]  # noqa: E731
-    return ({"receipts": sorted(a_out, key=key)}, {"receipts": sorted(b_out, key=key)}, changes)
+    clean = lambda r: {k: v for k, v in r.items() if k != "driver_unresolved"}  # noqa: E731
+    return ({"receipts": sorted((clean(done_a[str(rd)]) for rd in s["rounds"]), key=key)},
+            {"receipts": sorted((clean(done_b[str(rd)]) for rd in s["rounds"]), key=key)}, changes)
 
 
 def second_judge(env: Env, sample: list[dict], frame_blocks: dict, stage_a: dict, seed: int,
-                 log: list[dict]) -> dict:
+                 log: list[dict], done: dict | None = None, save: Callable[[], None] = _noop) -> dict:
     """Judge a separately drawn handful of text-recovered receipts again, Stage A
     only and without the first judge's labels. Reports reproducibility."""
+    done = done if done is not None else {}
     pool = [(s["pr"], r["round"]) for s in sample for r in stage_a.get(s["pr"], {}).get("receipts", [])
             if r.get("text_recovered")]
     rng = random.Random(seed ^ 0x5EC0D)
     chosen = sorted(rng.sample(pool, min(SECOND_JUDGE_ITEMS, len(pool)))) if pool else []
     pairs, confusion = [], Counter()
     for pr, rd in chosen:
-        block = {b["round"]: b for b in frame_blocks[pr]}[rd]
-        rec = _receipt_block(rd, block["head"], env.evidence(pr, block), stage_b=False, stage_a=None)
-        j2 = _try_judge(env, stage_prompt(pr, [rec], outcome_aware=False), block["reviewer"], f"S:{pr}:{rd}", log)
-        r2 = next((r for r in (j2 or {"receipts": []})["receipts"] if r["round"] == rd), None)
-        r1 = next(r for r in stage_a[pr]["receipts"] if r["round"] == rd)
-        o1, o2 = _outcome_of(r1), _outcome_of(r2) if r2 else "no_judgment"
-        confusion[f"{o1} -> {o2}"] += 1
-        pairs.append({"pr": pr, "round": rd, "judge1": o1, "judge2": o2})
+        key = f"{pr}|{rd}"
+        if key not in done:
+            block = {b["round"]: b for b in frame_blocks[pr]}[rd]
+            rec = _receipt_block(rd, block["head"], env.evidence(pr, block), stage_b=False, stage_a=None)
+            j2 = _try_judge(env, stage_prompt(pr, [rec], outcome_aware=False), block["reviewer"], f"S:{pr}:{rd}", log)
+            r2 = next((r for r in (j2 or {"receipts": []})["receipts"] if r["round"] == rd), None)
+            r1 = next(r for r in stage_a[pr]["receipts"] if r["round"] == rd)
+            done[key] = {"pr": pr, "round": rd, "judge1": _outcome_of(r1),
+                         "judge2": _outcome_of(r2) if r2 else "no_judgment"}
+            save()
+        pairs.append(done[key])
+        confusion[f"{done[key]['judge1']} -> {done[key]['judge2']}"] += 1
     agree = sum(1 for p in pairs if p["judge1"] == p["judge2"])
     return {"items": pairs, "agree": agree, "of": len(pairs), "confusion": dict(sorted(confusion.items())),
             "note": "Disagreement measures reproducibility of the judge, not truth."}
 
 
-def calibrate(env: Env, log: list[dict], items: list[dict] | None = None) -> dict:
+def calibrate(env: Env, log: list[dict], items: list[dict] | None = None, done: dict | None = None,
+              save: Callable[[], None] = _noop) -> dict:
     """Judge the fixed calibration set; each item has a known receipt-level outcome."""
     if items is None:
         items = json.loads(CALIBRATION_FILE.read_text())["items"]
     todo: list[dict] = items
-    matches, rows = 0, []
+    done = done if done is not None else {}
     for it in todo:
+        if it["id"] in done:
+            continue
         rec = _receipt_block(1, None, {"text": it["finding"], "diff": it["diff"], "spec": it["spec"]},
                              stage_b=False, stage_a=None)
         j = _try_judge(env, stage_prompt(it["id"], [rec], outcome_aware=False), it["reviewer"], f"C:{it['id']}", log)
         r = next((x for x in (j or {"receipts": []})["receipts"] if x["round"] == 1), None)
         got = _outcome_of(r) if r else "no_judgment"
-        ok = got == it["expected"]
-        matches += ok
-        rows.append({"id": it["id"], "expected": it["expected"], "got": got, "match": ok})
+        done[it["id"]] = {"id": it["id"], "expected": it["expected"], "got": got, "match": got == it["expected"]}
+        save()
+    rows = [done[it["id"]] for it in todo]
+    matches = sum(1 for r in rows if r["match"])
     return {"matches": matches, "of": len(todo), "rows": rows,
             "drift": matches < min(CALIBRATION_MIN_MATCH, len(todo))}
 
@@ -250,42 +299,68 @@ def _load_json(path: pathlib.Path, default):
 
 def run_week(env: Env, receipt_rows: list[dict], out_root: pathlib.Path, *, week: str | None = None,
              with_calibration: bool = True) -> dict:
-    """Run one week end to end under ``out_root/<week>/``. Resumable: judgments
-    already written are kept, and a rerun on the same snapshot gives the same
-    sample. Returns a summary dict; raises Paused when quota stops the run."""
+    """Run one week end to end under ``out_root/<week>/``. Resumable: every
+    finished judge call is kept, and a rerun on the same snapshot gives the same
+    sample. Returns a summary dict; raises Paused when quota stops the run and
+    ValueError when another run holds the week."""
     now = env.now()
     week = week or latest_ready_week(now)
     run_dir = out_root / week
     run_dir.mkdir(parents=True, exist_ok=True)
+    with open(run_dir / ".lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ValueError(f"another run holds {week}") from None
+        return _run_locked(env, receipt_rows, run_dir, week, now, with_calibration)
+
+
+def _rows_digest(rows: list[dict]) -> str:
+    blob = json.dumps(rows, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _run_locked(env: Env, receipt_rows: list[dict], run_dir: pathlib.Path, week: str, now: dt.datetime,
+                with_calibration: bool) -> dict:
     snap_path = run_dir / "population.json"
+    digest = _rows_digest(receipt_rows)
     if snap_path.exists():
         snap = json.loads(snap_path.read_text())
     else:
         receipts = core.load_receipts(receipt_rows)
         snap = core.freeze(receipts, week, now, code_version="review-loop-2")
         snap["dropped_unattributable"] = len(receipt_rows) - len(receipts)
+        snap["input_rows_sha256"] = digest
         _save(snap_path, snap)
     drawn = core.draw(snap["population"]["frame"], snap["manifest"]["bootstrap_seed"])
     _save(run_dir / "sample.json", drawn)
     frame_blocks = {f["pr"]: f["blocks"] for f in snap["population"]["frame"]}
-    state = _load_json(run_dir / "judgments-state.json", {"a": {}, "b": {}, "changes": {}, "log": []})
+    state = _load_json(run_dir / "judgments-state.json", {})
+    for k, v in (("a", {}), ("b", {}), ("changes", {}), ("log", []), ("partial", {}), ("second_items", {}),
+                 ("cal_rows", {})):
+        state.setdefault(k, v)
+    state["input_changed"] = snap.get("input_rows_sha256") not in (None, digest)
     log = state["log"]
+    path = run_dir / "judgments-state.json"
+    save = lambda: _save(path, state)  # noqa: E731
     try:
         for s in drawn["sample"]:
             if s["pr"] in state["a"]:
                 continue
-            a, b, ch = judge_pr(env, s, frame_blocks, log)
+            part = state["partial"].setdefault(s["pr"], {})
+            a, b, ch = judge_pr(env, s, frame_blocks, log, part, save)
             state["a"][s["pr"]], state["b"][s["pr"]], state["changes"][s["pr"]] = a, b, ch
-            _save(run_dir / "judgments-state.json", state)
+            state["partial"].pop(s["pr"], None)
+            save()
         if "second" not in state:
             state["second"] = second_judge(env, drawn["sample"], frame_blocks, state["a"],
-                                           snap["manifest"]["bootstrap_seed"], log)
-            _save(run_dir / "judgments-state.json", state)
+                                           snap["manifest"]["bootstrap_seed"], log, state["second_items"], save)
+            save()
         if with_calibration and "calibration" not in state:
-            state["calibration"] = calibrate(env, log)
-            _save(run_dir / "judgments-state.json", state)
+            state["calibration"] = calibrate(env, log, None, state["cal_rows"], save)
+            save()
     except Paused:
-        _save(run_dir / "judgments-state.json", state)
+        save()
         raise
     return finish_week(run_dir, snap, drawn, state)
 
@@ -326,6 +401,8 @@ def render_judge_section(state: dict, agg_a: dict, agg_b: dict) -> str:
         lines.append(f"Same-lab exception: {len(same)} judge call(s) ran on the reviewer's lab ({', '.join(same[:5])}).")
     if unknown:
         lines.append(f"Judge identity not recorded for {len(unknown)} call(s); lab independence is unverified for them.")
+    if state.get("input_changed"):
+        lines.append("Note: the receipt directory changed after this week was frozen; the frozen population was kept.")
     lines.append(f"Stage A (blind, headline): lower {agg_a['L']:.1%}, upper {agg_a['U']:.1%}.")
     lines.append(f"Stage B (outcome-aware, comparison only): lower {agg_b['L']:.1%}, upper {agg_b['U']:.1%}; "
                  f"{sum(state['changes'].values())} outcome-induced label change(s).")
@@ -397,7 +474,10 @@ class TextIndex:
 
 def _gh(args: list[str], accept: str | None = None) -> str | None:
     cmd = ["gh", "api"] + (["-H", f"Accept: {accept}"] if accept else []) + args
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None  # evidence unavailable, recorded as such by the caller
     return out.stdout if out.returncode == 0 else None
 
 
@@ -423,7 +503,29 @@ def make_real_evidence(text_index: TextIndex) -> Callable[[str, dict], dict]:
     return evidence
 
 
-def make_real_dispatch(workdir: pathlib.Path, selected_root: pathlib.Path, decision_context: pathlib.Path,
+def ledger_identity(ledger: pathlib.Path, dispatch_id: str) -> tuple[str | None, str | None]:
+    """Model and effort that actually ran, from the dispatch run receipt for
+    ``dispatch_id``. Reads the top-level fields the dispatcher writes and, as a
+    fallback, an ``execution`` object. Prefers a completed attempt."""
+    if not ledger.exists():
+        return None, None
+    best = None
+    for line in ledger.read_text().splitlines()[-2000:]:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("dispatch_id") != dispatch_id:
+            continue
+        ex = row.get("execution") if isinstance(row.get("execution"), dict) else {}
+        model = row.get("model") or ex.get("model")
+        effort = row.get("effort") or row.get("reasoning_effort") or ex.get("reasoning_effort") or ex.get("effort")
+        if model and (best is None or row.get("outcome") == "completed" or best[2] != "completed"):
+            best = (model, effort, row.get("outcome"))
+    return (best[0], best[1]) if best else (None, None)
+
+
+def make_real_dispatch(selected_root: pathlib.Path, decision_context: pathlib.Path,
                        ledger: pathlib.Path) -> Callable[[str, str, str], dict]:
     import os
     import tempfile
@@ -431,27 +533,21 @@ def make_real_dispatch(workdir: pathlib.Path, selected_root: pathlib.Path, decis
     def dispatch(prompt: str, reviewer: str, _tag: str) -> dict:
         did = str(uuid.uuid4())
         with tempfile.TemporaryDirectory(prefix="review-loop-judge-") as tmp:
+            work = pathlib.Path(tmp) / "work"  # fresh and empty for every call
+            work.mkdir()
             pf, of = pathlib.Path(tmp) / "prompt.md", pathlib.Path(tmp) / "out.md"
             pf.write_text(prompt)
             env = dict(os.environ, CLAVAIN_SELECTED_ROOT=str(selected_root),
                        CLAVAIN_ROUTING_POLICY=str(selected_root / "config" / "routing.yaml"),
-                       CLAVAIN_DECISION_CONTEXT=str(decision_context), CLAVAIN_DISPATCH_ID=did)
+                       CLAVAIN_DECISION_CONTEXT=str(decision_context), CLAVAIN_DISPATCH_ID=did,
+                       CLAVAIN_DISPATCH_RECEIPT_FILE=str(ledger))
             proc = subprocess.run(
                 ["bash", str(selected_root / "scripts" / "dispatch.sh"), "--role", JUDGE_ROLE,
-                 "--producer-identity", reviewer, "-C", str(workdir), "-s", "read-only",
+                 "--producer-identity", reviewer, "-C", str(work), "-s", "read-only",
                  "-o", str(of), "--prompt-file", str(pf)],
                 env=env, capture_output=True, text=True, timeout=1500)
             text = of.read_text() if of.exists() else ""
-        identity = effort = None
-        if ledger.exists():
-            for line in ledger.read_text().splitlines()[-400:][::-1]:
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if row.get("dispatch_id") == did:
-                    identity, effort = row.get("model"), row.get("effort")
-                    break
+        identity, effort = ledger_identity(ledger, did)
         return {"text": text, "identity": identity, "effort": effort, "dispatch_id": did,
                 "exit_code": proc.returncode}
     return dispatch

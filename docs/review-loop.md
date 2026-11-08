@@ -33,7 +33,7 @@ digest.
 - Judge: packaged `dispatch.sh --role validation --producer-identity <reviewer>`, so the seat
   lands on a different lab than the reviewer and the dispatch ledger records the real model and
   effort. Same-lab or unrecorded identities are declared in the report. The judge runs in an
-  empty scratch directory, read-only, and its prompt says the embedded text is data.
+  fresh empty scratch directory per call, read-only, and its prompt says the embedded text is data.
 - Stage A sees the original head's diff, the PR description and the stored finding text. Stage B
   also sees the earlier Stage A labels and what landed. Every changed label is counted.
 - Finding text comes from `--text-root` directories: review output files that name exactly one
@@ -44,9 +44,15 @@ digest.
   synthetic items with known outcomes (`calibration.json`, extended only by adding) is judged
   every run, and fewer than 8 matches is reported as drift.
 - Quota: before every judge call the driver reads the account pool and pauses (exit 3) when no
-  enabled account has headroom below 80% in every limit window, or the reading is unavailable.
-  Judgments already made are kept; rerun to resume.
-- A judge reply that cannot be parsed leaves its receipts unresolved; it does not stop the week.
+  enabled account has headroom below 80% in every limit window, or the reading is unavailable or malformed
+  (an account counts only when explicitly enabled and every window is a finite number in 0 to 1).
+  Every finished judge call is kept, including Stage A of a PR whose Stage B was cut short, second-judge
+  items and calibration items; rerun to resume. A second run on a week another run holds is refused.
+- A judge reply that cannot be parsed or fails type checks leaves its receipts unresolved; it does not
+  stop the week. Stage B never inherits Stage A's findings: a missing Stage B judgment is unresolved.
+- A PR's rounds are batched per reviewer lab, so each batch has a judge on another lab than its own
+  reviewer. If the receipt directory changed after the week was frozen, the report says so and keeps
+  the frozen population.
 - The judge seat can use tools in its own sandbox. Diffs and review text are untrusted input, so
   they are sanitised and size-capped, and the scratch directory holds nothing of value.
 

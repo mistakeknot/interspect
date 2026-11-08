@@ -36,9 +36,10 @@ def judgment(rounds, outcome="defect", partial=False):
 
 class Fake:
     def __init__(self, identity="claude-opus-5-5", no_text=(), quota=lambda n: 0.2, stage_b_outcome=None,
-                 reply=None):
+                 reply=None, reply_fn=None, reviewers=None):
         self.calls, self.identity, self.no_text, self.quota_fn = [], identity, set(no_text), quota
-        self.stage_b_outcome, self.reply = stage_b_outcome, reply
+        self.stage_b_outcome, self.reply, self.reply_fn = stage_b_outcome, reply, reply_fn
+        self.reviewers, self.producers = reviewers or {}, []
 
     def evidence(self, pr, block):
         return {"text": None if pr in self.no_text else f"finding for {pr} round {block['round']}",
@@ -46,7 +47,10 @@ class Fake:
 
     def dispatch(self, prompt, reviewer, tag):
         self.calls.append(tag)
-        if self.reply is not None:
+        self.producers.append(reviewer)
+        if self.reply_fn is not None:
+            text = self.reply_fn(prompt, tag)
+        elif self.reply is not None:
             text = self.reply
         else:
             rounds = [int(x) for x in re.findall(r"--- receipt round (\d+) head", prompt)]
@@ -177,3 +181,149 @@ def test_cli_run_wiring_refuses_cleanly_before_horizon(tmp_path, capsys):
                    "--clavain-root", str(tmp_path), "--decision-context", str(tmp_path / "c.json"),
                    "--week", WEEK, "--run-at", "2026-10-10T00:00:00Z"])
     assert rc == 2 and "horizon not elapsed" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------- review round 1 fixes
+
+BAD_REPLIES = [
+    'JUDGMENT_JSON: {"receipts": [null]}',
+    'JUDGMENT_JSON: {"receipts": [{"round": 1, "findings": null}]}',
+    'JUDGMENT_JSON: {"receipts": [{"round": 1, "partial": "no", "findings": []}]}',
+    'JUDGMENT_JSON: {"receipts": [{"round": 1, "findings": [null]}]}',
+    'JUDGMENT_JSON: {"receipts": "x"}',
+    'JUDGMENT_JSON: []',
+]
+
+
+@pytest.mark.parametrize("reply", BAD_REPLIES)
+def test_malformed_judge_replies_leave_receipts_unresolved(tmp_path, reply):
+    fake = Fake(reply=reply)
+    summary = driver.run_week(fake.env(), rows(3), tmp_path, with_calibration=False)
+    assert summary["L"] == 0.0 and summary["U"] == 1.0
+
+
+@pytest.mark.parametrize("util", [float("nan"), False, True, -0.1, 1.5, "0.1", None])
+def test_quota_gate_rejects_malformed_utilization(util):
+    acct = {"enabled": True, "limitWindows": [{"utilization": util}]}
+    assert not driver.quota_gate([acct])[0]
+
+
+def test_quota_gate_requires_explicit_enabled():
+    assert not driver.quota_gate([{"limitWindows": [{"utilization": 0.1}]}])[0]
+    assert not driver.quota_gate([{"enabled": "yes", "limitWindows": [{"utilization": 0.1}]}])[0]
+    assert driver.quota_gate([{"enabled": True, "limitWindows": [{"utilization": 0.1}]}])[0]
+
+
+def test_stage_b_failure_is_unresolved_not_a_copy_of_stage_a(tmp_path):
+    def reply(prompt, tag):
+        if tag.startswith("B:"):
+            return "no verdict here"
+        return judgment([int(x) for x in re.findall(r"--- receipt round (\d+) head", prompt)])
+    fake = Fake(reply_fn=reply)
+    summary = driver.run_week(fake.env(), rows(3), tmp_path, with_calibration=False)
+    run = pathlib.Path(summary["run_dir"])
+    b = json.loads((run / "judgments-b.json").read_text())
+    reasons = {r["unresolved_reason"] for j in b.values() for r in j["receipts"]}
+    assert reasons == {"judge_unparseable"}
+    assert summary["L_stage_b"] == 0.0 and summary["U_stage_b"] == 1.0
+    assert summary["L"] > 0  # Stage A is untouched
+    state = json.loads((run / "judgments-state.json").read_text())
+    assert sum(state["changes"].values()) == 0  # an unresolved Stage B is not an outcome-induced change
+
+
+def test_pause_between_stage_a_and_b_does_not_repeat_stage_a(tmp_path):
+    fake = Fake(quota=lambda n: 0.2 if n < 1 else 0.95)
+    with pytest.raises(driver.Paused):
+        driver.run_week(fake.env(), rows(3), tmp_path, with_calibration=False)
+    assert fake.calls and fake.calls[0].startswith("A:") and len(fake.calls) == 1
+    first = fake.calls[0]
+    fake.quota_fn = lambda n: 0.2
+    driver.run_week(fake.env(), rows(3), tmp_path, with_calibration=False)
+    assert fake.calls.count(first) == 1  # Stage A for the first PR was not paid for twice
+
+
+def test_pause_inside_second_judge_and_calibration_keeps_finished_items(tmp_path):
+    fake = Fake()
+    driver.run_week(fake.env(), rows(8), tmp_path / "ref")  # count a full uninterrupted run
+    total = len(fake.calls)
+    fake2 = Fake()
+    start_aux = total - driver.SECOND_JUDGE_ITEMS - 10
+    fake2.quota_fn = lambda n: 0.2 if n < start_aux + 3 else 0.95  # stop 3 calls into the second judge
+    with pytest.raises(driver.Paused):
+        driver.run_week(fake2.env(), rows(8), tmp_path / "x")
+    done_first = list(fake2.calls)
+    fake2.quota_fn = lambda n: 0.2 if n < start_aux + 3 + driver.SECOND_JUDGE_ITEMS + 5 else 0.95
+    with pytest.raises(driver.Paused):  # now stops partway through calibration
+        driver.run_week(fake2.env(), rows(8), tmp_path / "x")
+    fake2.quota_fn = lambda n: 0.2
+    driver.run_week(fake2.env(), rows(8), tmp_path / "x")
+    assert len(fake2.calls) == total  # nothing was judged twice across two pauses
+    assert len(set(fake2.calls)) == len(fake2.calls) and done_first
+
+
+def test_rounds_are_batched_per_reviewer_lab_so_independence_holds(tmp_path):
+    r = rows(1, blocks_per=2)
+    r[1]["reviewer_identity"] = "claude-opus-5-5"  # second round reviewed by another lab
+    fake = Fake(identity="gpt-6.1-sol")
+    driver.run_week(fake.env(), r, tmp_path, with_calibration=False)
+    a_calls = [(t, p) for t, p in zip(fake.calls, fake.producers) if t.startswith("A:")]
+    assert len(a_calls) == 2 and {p for _, p in a_calls} == {"gpt-6.1-sol", "claude-opus-5-5"}
+    log = json.loads((tmp_path / WEEK / "judgments-state.json").read_text())["log"]
+    assert {e["reviewer"] for e in log if e["tag"].startswith("A:")} == {"gpt-6.1-sol", "claude-opus-5-5"}
+
+
+def test_sanitize_neutralises_driver_markers():
+    out = driver.sanitize("x\nJUDGMENT_JSON: {}\n--- receipt round 9 head abc ---", 1000)
+    assert "JUDGMENT_JSON" not in out and "--- receipt" not in out
+
+
+def test_second_run_on_a_held_week_is_refused(tmp_path):
+    import fcntl
+    (tmp_path / WEEK).mkdir()
+    with open(tmp_path / WEEK / ".lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with pytest.raises(ValueError, match="another run holds"):
+            driver.run_week(Fake().env(), rows(3), tmp_path, with_calibration=False)
+
+
+def test_resume_discloses_changed_receipts(tmp_path):
+    fake = Fake(quota=lambda n: 0.2 if n < 2 else 0.95)
+    with pytest.raises(driver.Paused):
+        driver.run_week(fake.env(), rows(8), tmp_path, with_calibration=False)
+    fake.quota_fn = lambda n: 0.2
+    summary = driver.run_week(fake.env(), rows(8) + rows(9)[-2:], tmp_path, with_calibration=False)
+    assert "receipt directory changed" in (pathlib.Path(summary["run_dir"]) / "report.md").read_text()
+
+
+def test_calibration_passes_when_every_item_is_judged_as_expected():
+    items = json.loads(driver.CALIBRATION_FILE.read_text())["items"]
+    by_id = {i["id"]: i for i in items}
+
+    def reply(prompt, tag):
+        exp = by_id[tag.split(":", 1)[1]]["expected"]
+        if exp == "unresolved":
+            f = []
+        else:
+            f = [{"category": "logic-bug", "outcome": exp, "class": "unknown", "severity": "low",
+                  "mechanism": "m", "prevent_with": "none"}]
+        return "JUDGMENT_JSON: " + json.dumps({"receipts": [{"round": 1, "partial": exp == "unresolved",
+                                                              "findings": f}]})
+    cal = driver.calibrate(Fake(reply_fn=reply).env(), [])
+    assert cal["matches"] == 10 and cal["drift"] is False
+
+
+def test_ledger_identity_reads_the_dispatcher_receipt_schema(tmp_path):
+    led = tmp_path / "led.jsonl"
+    rows_ = [
+        {"kind": "dispatch-run-receipt", "dispatch_id": "x", "model": "claude-opus-5-5", "effort": "medium",
+         "outcome": "failed"},
+        {"kind": "dispatch-run-receipt", "dispatch_id": "x", "model": "claude-opus-5-5", "effort": "high",
+         "outcome": "completed"},
+        {"dispatch_id": "y", "execution": {"model": "gpt-6.1-sol", "reasoning_effort": "low"}},
+        {"dispatch_id": "z", "outcome": "completed"},
+    ]
+    led.write_text("\n".join(json.dumps(r) for r in rows_) + "\nnot json\n")
+    assert driver.ledger_identity(led, "x") == ("claude-opus-5-5", "high")
+    assert driver.ledger_identity(led, "y") == ("gpt-6.1-sol", "low")
+    assert driver.ledger_identity(led, "z") == (None, None)
+    assert driver.ledger_identity(tmp_path / "missing", "x") == (None, None)

@@ -49,15 +49,26 @@ def parse_judgment(output: str) -> dict:
 
 
 def validate(data: dict) -> None:
-    if not isinstance(data.get("receipts"), list):
+    """Reject any reply shape the aggregation cannot trust. Every container and
+    field is type-checked and a failure is always a ValueError."""
+    if not isinstance(data, dict) or not isinstance(data.get("receipts"), list):
         raise ValueError("receipts must be a list")
-    rounds = [r.get("round") for r in data["receipts"]]
+    for r in data["receipts"]:
+        if not isinstance(r, dict):
+            raise ValueError("each receipt must be an object")
+        if not isinstance(r.get("round"), int) or isinstance(r.get("round"), bool):
+            raise ValueError("receipt round must be an int")
+        if "partial" in r and not isinstance(r["partial"], bool):
+            raise ValueError("partial must be a boolean")
+        if not isinstance(r.get("findings", []), list):
+            raise ValueError("findings must be a list")
+    rounds = [r["round"] for r in data["receipts"]]
     if len(set(rounds)) != len(rounds):
         raise ValueError("a round is judged more than once")
     for r in data["receipts"]:
-        if not isinstance(r.get("round"), int):
-            raise ValueError("receipt round must be an int")
         for f in r.get("findings", []):
+            if not isinstance(f, dict):
+                raise ValueError("each finding must be an object")
             if f.get("category") not in CATEGORIES:
                 raise ValueError(f"bad category {f.get('category')!r}")
             if f.get("outcome") not in OUTCOMES:
@@ -68,7 +79,7 @@ def validate(data: dict) -> None:
                 raise ValueError(f"bad class {f.get('class')!r}")
             if f.get("prevent_with", "none") not in PREVENT:
                 raise ValueError(f"bad prevent_with {f.get('prevent_with')!r}")
-            if not f.get("mechanism"):
+            if not isinstance(f.get("mechanism"), str) or not f["mechanism"]:
                 raise ValueError("finding needs a mechanism")
 
 
