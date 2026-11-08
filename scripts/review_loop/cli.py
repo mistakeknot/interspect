@@ -3,6 +3,8 @@
     review_loop freeze    --receipts DIR --week 2026-W44 --run-at ISO --out FILE
     review_loop sample    --snapshot FILE --out FILE
     review_loop aggregate --snapshot FILE --sample FILE --judgments FILE --report FILE [--digest FILE]
+    review_loop run       --receipts DIR --out-root DIR --clavain-root DIR --decision-context FILE
+                          [--week 2026-W44] [--text-root DIR ...] [--no-calibration]
 
 Each step reads and writes JSON files, so a week can be replayed byte-for-byte
 from its snapshot. Nothing here edits policy or files an issue.
@@ -14,9 +16,10 @@ import argparse
 import datetime as dt
 import json
 import pathlib
+import subprocess
 import sys
 
-from . import core
+from . import core, driver
 
 CODE_VERSION = "review-loop-1"
 
@@ -86,6 +89,33 @@ def cmd_aggregate(a) -> int:
     return 0
 
 
+def cmd_run(a) -> int:
+    now = core.parse_time(a.run_at)
+    out_root = pathlib.Path(a.out_root)
+    out_root.mkdir(parents=True, exist_ok=True)
+    index = driver.TextIndex([pathlib.Path(r) for r in a.text_root])
+    env = driver.Env(
+        evidence=driver.make_real_evidence(index),
+        dispatch=driver.make_real_dispatch(pathlib.Path(a.clavain_root),
+                                           pathlib.Path(a.decision_context), pathlib.Path(a.ledger)),
+        quota=driver.real_quota,
+        now=lambda: now)
+    try:
+        summary = driver.run_week(env, driver.read_receipts(pathlib.Path(a.receipts)), out_root,
+                                  week=a.week, with_calibration=not a.no_calibration)
+    except ValueError as exc:
+        print(f"refusing to run: {exc}", file=sys.stderr)
+        return 2
+    except driver.Paused as exc:
+        print(f"paused: {exc}; rerun to resume", file=sys.stderr)
+        return 3
+    except (RuntimeError, subprocess.TimeoutExpired) as exc:
+        print(f"judge dispatch failed: {exc}; finished calls are kept, rerun to resume", file=sys.stderr)
+        return 4
+    print(json.dumps(summary, sort_keys=True))
+    return 0
+
+
 def _recovered(sample: list[dict], judgments: dict) -> dict:
     total = rec = 0
     for s in sample:
@@ -117,6 +147,17 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--report", required=True)
     g.add_argument("--digest")
     g.set_defaults(fn=cmd_aggregate)
+    r = sub.add_parser("run")
+    r.add_argument("--receipts", required=True)
+    r.add_argument("--out-root", required=True)
+    r.add_argument("--clavain-root", required=True)
+    r.add_argument("--decision-context", required=True)
+    r.add_argument("--ledger", default=str(pathlib.Path.home() / ".local/state/clavain/dispatch-receipts.jsonl"))
+    r.add_argument("--week")
+    r.add_argument("--text-root", action="append", default=[])
+    r.add_argument("--run-at", default=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    r.add_argument("--no-calibration", action="store_true")
+    r.set_defaults(fn=cmd_run)
     a = p.parse_args(argv)
     return a.fn(a)
 

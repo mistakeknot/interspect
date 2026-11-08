@@ -17,6 +17,45 @@ Each step reads and writes JSON files so a week replays byte for byte from its s
 
 `freeze` refuses to run until 14 days after the week closes.
 
+## Weekly driver
+
+`run` does all of the above in one command and is what a timer calls:
+
+    scripts/review_loop/run.sh run --receipts DIR --out-root DIR --clavain-root DIR \
+        --decision-context FILE [--week 2026-W40] [--text-root DIR ...] [--no-calibration]
+
+With no `--week` it takes the latest week whose 14-day horizon has elapsed. Output goes to
+`OUT_ROOT/<week>/`: `population.json`, `sample.json`, `judgments-a.json` (Stage A, headline),
+`judgments-b.json` (Stage B, comparison), `judgments-state.json` (resume state and the judge
+log), `report.md` and `digest.txt`. The driver sends nothing; whatever runs it forwards the
+digest.
+
+- Judge: packaged `dispatch.sh --role validation --producer-identity <reviewer>`, so the seat
+  lands on a different lab than the reviewer and the dispatch ledger records the real model and
+  effort. Same-lab or unrecorded identities are declared in the report. The judge runs in an
+  fresh empty scratch directory per call, read-only, and its prompt says the embedded text is data.
+- Stage A sees the original head's diff, the PR description and the stored finding text. Stage B
+  also sees the earlier Stage A labels and what landed. Every changed label is counted.
+- Finding text comes from `--text-root` directories: review output files that name exactly one
+  full head sha and contain a VERDICT line. A receipt with no text is not sent to a judge; it is
+  unresolved with reason `text_unrecovered` and widens the upper bound. This is the fallback until
+  receipts carry their findings.
+- A second judge re-judges 5 text-recovered receipts, blind to the first judge; a fixed set of 10
+  synthetic items with known outcomes (`calibration.json`, extended only by adding) is judged
+  every run, and fewer than 8 matches is reported as drift.
+- Quota: before every judge call the driver reads the account pool and pauses (exit 3) when no
+  enabled account has headroom below 80% in every limit window, or the reading is unavailable or malformed
+  (an account counts only when explicitly enabled and every window is a finite number in 0 to 1).
+  Every finished judge call is kept, including Stage A of a PR whose Stage B was cut short, second-judge
+  items and calibration items; rerun to resume. A second run on a week another run holds is refused.
+- A judge reply that cannot be parsed or fails type checks leaves its receipts unresolved; it does not
+  stop the week. Stage B never inherits Stage A's findings: a missing Stage B judgment is unresolved.
+- A PR's rounds are batched per reviewer lab, so each batch has a judge on another lab than its own
+  reviewer. If the receipt directory changed after the week was frozen, the report says so and keeps
+  the frozen population.
+- The judge seat can use tools in its own sandbox. Diffs and review text are untrusted input, so
+  they are sanitised and size-capped, and the scratch directory holds nothing of value.
+
 ## Design
 
 - A PR belongs to the week of its first review of any verdict. The frame is the
