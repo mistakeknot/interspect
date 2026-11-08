@@ -69,7 +69,11 @@ def cmd_aggregate(a) -> int:
     snap = _load(a.snapshot)
     drawn = _load(a.sample)
     judgments = _load(a.judgments)
-    agg = core.aggregate(drawn["sample"], judgments, snap["manifest"], snap["population"])
+    try:
+        agg = core.aggregate(drawn["sample"], judgments, snap["manifest"], snap["population"])
+    except ValueError as exc:
+        print(f"refusing to aggregate: {exc}", file=sys.stderr)
+        return 2
     mechs = core.mechanism_counts(drawn["sample"], judgments)
     proposals = core.backlog_proposals(mechs, judgments.get("_changes") if isinstance(judgments, dict) else None)
     recoverable = _recovered(drawn["sample"], judgments)

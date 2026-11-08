@@ -41,6 +41,14 @@ def test_timestamps_with_fractions_and_bad_rows():
     assert [r["pr"] for r in rows] == ["o/r#1"]
 
 
+def test_sub_microsecond_order_is_preserved():
+    a = {**rec(1, "09-29", "BLOCK", head="late", did="a"), "created_at": "2026-09-29T10:00:00.0000009Z"}
+    b = {**rec(1, "09-29", "BLOCK", head="early", did="b"), "created_at": "2026-09-29T10:00:00.0000001Z"}
+    rows = core.load_receipts([a, b])
+    assert [r["head"] for r in rows] == ["early", "late"]
+    assert [r["round"] for r in rows] == [1, 2]
+
+
 def test_freeze_refuses_before_horizon():
     rows = core.load_receipts([rec(1, "09-29", "BLOCK")])
     with pytest.raises(ValueError, match="horizon not elapsed"):
@@ -99,10 +107,23 @@ def test_opus_certainty_stratum_taken_whole_when_small():
 
 def test_budget_raised_when_mandatory_exceeds_it():
     frame = []
-    for i in range(40):  # 40 distinct strata of 2 PRs each, no pooling can fit 30
-        frame += frame_of(2, f"rev{i}", f"prod{i}", start=i * 10 + 1)
+    for i in range(31):  # 31 non-poolable strata (3 PRs each): one PR each already needs 31 > 30
+        frame += frame_of(3, f"gpt-{i}", "claude-sonnet-5-5", start=i * 10 + 1)
     plan = core.allocate(frame)
-    assert plan["budget_used"] >= 1
+    assert plan["budget_raised"] and plan["budget_used"] == 31
+    assert len(plan["strata"]) == 31
+    assert all(s["n"] == 1 and not s["pooled"] for s in plan["strata"].values())
+    drawn = core.draw(frame, 1)
+    assert len({s["stratum"] for s in drawn["sample"]}) == 31
+
+
+def test_small_strata_pool_by_lab_and_budget_holds():
+    frame = []
+    for i in range(40):  # 40 strata of 2 PRs pool into one openai stratum
+        frame += frame_of(2, f"gpt-{i}", "claude-sonnet-5-5", start=i * 10 + 1)
+    plan = core.allocate(frame)
+    assert list(plan["strata"]) == ["other|openai"] and plan["strata"]["other|openai"]["pooled"]
+    assert plan["budget_used"] == core.BUDGET and not plan["budget_raised"]
 
 
 def test_draw_is_reproducible_for_a_seed():
@@ -116,9 +137,10 @@ def finding(outcome="defect", cat="logic-bug", mech="m", sev="medium"):
             "mechanism": mech, "prevent_with": "test"}
 
 
-def sample_rows(n, w=1.0, blocks=1, stratum="a|b"):
+def sample_rows(n, w=1.0, blocks=1, stratum="a|b", size=None):
     return [{"pr": f"o/r#{i}", "stratum": stratum, "weight": w, "n_blocks": blocks,
-             "stratum_size": n, "stratum_n": n, "pooled": False} for i in range(n)]
+             "rounds": list(range(1, blocks + 1)),
+             "stratum_size": size or n, "stratum_n": n, "pooled": False} for i in range(n)]
 
 
 def test_receipt_outcome_precedence():
@@ -149,7 +171,7 @@ def test_bounds_ordering_and_same_denominator():
 
 
 def test_bootstrap_endpoints_ordered_deterministic_and_small_sample_suppressed():
-    sample = sample_rows(12, w=3.0)
+    sample = sample_rows(12, w=3.0, size=36)  # 12 drawn from 36: a real sample, not a census
     judgments = {s["pr"]: {"receipts": [{"round": 1, "findings": [finding("defect" if i % 3 == 0 else "over_strict")]}]}
                  for i, s in enumerate(sample)}
     snap = {"manifest": {"week": WEEK, "bootstrap_seed": 11}, "population": {"n_block_receipts": 36}}
@@ -159,7 +181,10 @@ def test_bootstrap_endpoints_ordered_deterministic_and_small_sample_suppressed()
     assert a["interval"]["L"][0] <= a["interval"]["L"][1]
     assert a["interval"]["U"][0] <= a["interval"]["U"][1]
     assert a["L"] <= a["U"]
-    small = core.aggregate(sample[:5], judgments, snap["manifest"], snap["population"])
+    assert a["interval"]["L"][0] < a["interval"]["L"][1]  # not degenerate: f < 1 gives variance
+    assert 0 <= a["interval"]["L"][0] and a["interval"]["U"][1] <= 1
+    kept = {s["pr"]: judgments[s["pr"]] for s in sample[:5]}
+    small = core.aggregate(sample[:5], kept, snap["manifest"], snap["population"])
     assert small["interval"] is None
 
 
@@ -191,6 +216,50 @@ def test_backlog_needs_two_prs_for_a_non_high_mechanism():
     judgments = {sample[0]["pr"]: {"receipts": [{"round": 1, "findings": [
         finding(mech="x"), finding(mech="x"), finding(mech="x")]}]}}
     assert core.backlog_proposals(core.mechanism_counts(sample, judgments)) == []
+
+
+def test_duplicate_or_unexpected_judgment_rounds_are_rejected():
+    sample = sample_rows(2)
+    dup = {sample[0]["pr"]: {"receipts": [{"round": 1, "findings": [finding()]},
+                                          {"round": 1, "findings": [finding()]}]}}
+    with pytest.raises(ValueError, match="more than once"):
+        core.build_units(sample, dup)
+    stray_round = {sample[0]["pr"]: {"receipts": [{"round": 2, "findings": [finding()]}]}}
+    with pytest.raises(ValueError, match="not a BLOCK receipt"):
+        core.build_units(sample, stray_round)
+    stray_pr = {"o/r#99": {"receipts": [{"round": 1, "findings": [finding()]}]}}
+    with pytest.raises(ValueError, match="not sampled"):
+        core.build_units(sample, stray_pr)
+    with pytest.raises(ValueError, match="more than once"):
+        judge.validate({"receipts": [{"round": 1, "findings": []}, {"round": 1, "findings": []}]})
+
+
+def test_absent_expected_round_counts_as_unresolved_and_bounds_stay_in_range():
+    sample = sample_rows(3, blocks=2)
+    judgments = {sample[0]["pr"]: {"receipts": [{"round": 1, "findings": [finding()]}]}}  # round 2 absent
+    units = core.build_units(sample, judgments)
+    assert units[0]["confirmed"] == 1 and units[0]["unresolved"] == 1 and units[0]["total"] == 2
+    lo, up = core._bounds(units)
+    assert 0 <= lo <= up <= 1
+
+
+def test_analysis_pools_never_overwrite_allocation_strata():
+    frame = []
+    for i in range(28):
+        frame += frame_of(3, f"gpt-{i}", "claude-sonnet-5-5", start=i * 10 + 1)
+    for i in range(4):
+        frame += frame_of(2, f"gpt-{28 + i}", "claude-sonnet-5-5", start=1000 + i * 10)
+    drawn = core.draw(frame, 5)
+    assert "other|openai" in drawn["allocation"]["strata"]
+    units = core.build_units(drawn["sample"], {})
+    pools = core._analysis_strata(units)
+    flat = [u["pr"] for members in pools.values() for u in members]
+    assert sorted(flat) == sorted(u["pr"] for u in units)  # every sampled PR exactly once
+    sampled_pool = [u["pr"] for u in units if u["stratum"] == "other|openai"]
+    assert sorted(m["pr"] for m in pools["stratum:other|openai"]) == sorted(sampled_pool)
+    out = core.aggregate(drawn["sample"], {}, {"week": WEEK, "bootstrap_seed": 3},
+                         {"n_block_receipts": len(frame)})
+    assert out["U"] == pytest.approx(1.0) and out["L"] == 0.0
 
 
 def good_reply(**over):

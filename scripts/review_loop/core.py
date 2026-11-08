@@ -56,6 +56,15 @@ def parse_time(value: str) -> dt.datetime:
         microsecond=micro, tzinfo=dt.timezone.utc)
 
 
+def normalize_time(value: str) -> str:
+    """Canonical UTC string with a fixed nine-digit fraction, so string order is
+    time order at full precision."""
+    m = _TIME.match(value)
+    if not m:
+        raise ValueError(f"unsupported timestamp {value!r}")
+    return f"{m.group(1)}.{(m.group(2) or '0')[:9].ljust(9, '0')}Z"
+
+
 def iso_week(t: dt.datetime) -> str:
     year, week, _ = t.isocalendar()
     return f"{year}-W{week:02d}"
@@ -97,7 +106,7 @@ def load_receipts(rows: list[dict]) -> list[dict]:
         if not d.get("repo") or d.get("pr") is None or not d.get("created_at"):
             continue
         try:
-            t = parse_time(d["created_at"]).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            t = normalize_time(d["created_at"])
         except (ValueError, TypeError):
             continue
         out.append({
@@ -306,7 +315,7 @@ def draw(frame: list[dict], seed: int) -> dict:
     """Draw the sample. Returns sample rows with weights w = N_h / n_h."""
     plan = allocate(frame)
     rng = random.Random(seed)
-    n_blocks = {f["pr"]: len(f["blocks"]) for f in frame}
+    rounds = {f["pr"]: [b["round"] for b in f["blocks"]] for f in frame}
     rows = []
     for label, s in plan["strata"].items():
         members = list(s["members"])
@@ -314,7 +323,7 @@ def draw(frame: list[dict], seed: int) -> dict:
         weight = len(members) / len(chosen) if chosen else 0.0
         for pr in chosen:
             rows.append({"pr": pr, "stratum": label, "weight": weight,
-                         "n_blocks": n_blocks.get(pr, 0),
+                         "n_blocks": len(rounds.get(pr, [])), "rounds": rounds.get(pr, []),
                          "stratum_size": len(members), "stratum_n": len(chosen),
                          "pooled": s["pooled"]})
     rows.sort(key=lambda r: r["pr"])
@@ -354,14 +363,40 @@ def _bounds(units: list[dict]) -> tuple[float, float]:
     return conf / den, (conf + unres) / den
 
 
+def check_judgments(sample: list[dict], judgments: dict) -> None:
+    """Reject judgments that do not match the frozen sample: a PR that was not
+    sampled, a round that is not one of that PR's BLOCK receipts, or a round
+    judged twice. Keys starting with an underscore are metadata."""
+    expected = {}
+    for s in sample:
+        if "rounds" not in s:
+            raise ValueError(f"sample row for {s['pr']} lacks its BLOCK rounds")
+        expected[s["pr"]] = list(s["rounds"])
+    for pr in judgments:
+        if pr.startswith("_"):
+            continue
+        if pr not in expected:
+            raise ValueError(f"judgment for {pr}, which was not sampled")
+        seen: set = set()
+        for r in judgments[pr].get("receipts", []):
+            rd = r.get("round")
+            if rd in seen:
+                raise ValueError(f"{pr}: round {rd} judged more than once")
+            seen.add(rd)
+            if rd not in expected[pr]:
+                raise ValueError(f"{pr}: round {rd} is not a BLOCK receipt of the frozen sample")
+
+
 def build_units(sample: list[dict], judgments: dict) -> list[dict]:
     """One unit per sampled PR: its weight, BLOCK-receipt count, confirmed-defect
-    receipts and unresolved receipts without a confirmed defect."""
+    receipts and unresolved receipts without a confirmed defect. Expected rounds
+    with no judgment count as unresolved."""
+    check_judgments(sample, judgments)
     units = []
     for s in sample:
         j = judgments.get(s["pr"])
         receipts = j["receipts"] if j else []
-        total = s.get("n_blocks", len(receipts))
+        total = len(s["rounds"])
         confirmed = unresolved = 0
         for r in receipts:
             outcome = receipt_outcome(r.get("findings", []), bool(r.get("partial")))
@@ -369,9 +404,9 @@ def build_units(sample: list[dict], judgments: dict) -> list[dict]:
                 confirmed += 1
             elif outcome == "unresolved":
                 unresolved += 1
-        # BLOCK receipts without any judgment record count as unresolved
-        missing = max(0, total - len(receipts))
-        unresolved += missing
+        unresolved += total - len(receipts)
+        if confirmed + unresolved > total:
+            raise ValueError(f"{s['pr']}: {confirmed} confirmed + {unresolved} unresolved exceeds {total} receipts")
         units.append({"pr": s["pr"], "stratum": s["stratum"], "w": s["weight"], "total": total,
                       "confirmed": confirmed, "unresolved": unresolved, "pooled": s.get("pooled", False),
                       "stratum_size": s["stratum_size"], "stratum_n": s["stratum_n"]})
@@ -380,8 +415,10 @@ def build_units(sample: list[dict], judgments: dict) -> list[dict]:
 
 def _analysis_strata(units: list[dict]) -> dict:
     """Analysis-only pooling (weights preserved): a stratum with one sampled PR out
-    of several joins its reviewer lab's 'other'; a lab pool with one PR joins a
-    global 'other'. Population singletons and certainty strata keep zero variance."""
+    of several joins its reviewer lab's pool; a lab pool with one PR joins a
+    global pool. Population singletons and certainty strata keep zero variance.
+    Keys are namespaced ("stratum:", "lab-pool:", "global") so an analysis pool
+    can never replace an allocation stratum, and every unit appears once."""
     strata: dict[str, list[dict]] = defaultdict(list)
     for u in units:
         strata[u["stratum"]].append(u)
@@ -391,17 +428,17 @@ def _analysis_strata(units: list[dict]) -> dict:
         members = strata[k]
         n, size = len(members), members[0]["stratum_size"]
         if n == 1 and size > 1:
-            lab_pool[f"other|{lab_of(k.split('|')[0])}"].extend(members)
+            lab_pool[lab_of(k.split("|")[0])].extend(members)
         else:
-            out[k] = members
+            out[f"stratum:{k}"] = members
     glob: list[dict] = []
-    for k in sorted(lab_pool):
-        if len(lab_pool[k]) >= 2:
-            out[k] = lab_pool[k]
+    for lab in sorted(lab_pool):
+        if len(lab_pool[lab]) >= 2:
+            out[f"lab-pool:{lab}"] = lab_pool[lab]
         else:
-            glob.extend(lab_pool[k])
+            glob.extend(lab_pool[lab])
     if glob:
-        out["other|global"] = glob
+        out["global"] = glob
     return out
 
 

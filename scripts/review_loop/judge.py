@@ -51,6 +51,9 @@ def parse_judgment(output: str) -> dict:
 def validate(data: dict) -> None:
     if not isinstance(data.get("receipts"), list):
         raise ValueError("receipts must be a list")
+    rounds = [r.get("round") for r in data["receipts"]]
+    if len(set(rounds)) != len(rounds):
+        raise ValueError("a round is judged more than once")
     for r in data["receipts"]:
         if not isinstance(r.get("round"), int):
             raise ValueError("receipt round must be an int")
