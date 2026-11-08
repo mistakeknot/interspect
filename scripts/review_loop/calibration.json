@@ -1,0 +1,86 @@
+{
+  "version": "cal-1",
+  "note": "Synthetic items with known receipt-level outcomes; extend only by adding.",
+  "items": [
+    {
+      "id": "c01",
+      "expected": "defect",
+      "reviewer": "gpt-6.1-sol",
+      "diff": "Function sums prices with integer division, dropping cents.\n-    total += price\n+    total += price // 100",
+      "spec": "Spec: totals must be exact to the cent.",
+      "finding": "BLOCK. The diff divides prices by 100 using integer division, so any price below 100 contributes 0 and totals lose cents. This contradicts the spec and corrupts every invoice."
+    },
+    {
+      "id": "c02",
+      "expected": "defect",
+      "reviewer": "gpt-6.1-sol",
+      "diff": "Handler reads the token from the query string and compares with ==.\n+    if request.args['token'] == SECRET:",
+      "spec": "Spec: admin endpoints must require the secret token; compare in constant time.",
+      "finding": "BLOCK. The secret is compared with ==, which leaks timing, and is read from the query string, which is logged. The spec asks for a constant-time comparison."
+    },
+    {
+      "id": "c03",
+      "expected": "defect",
+      "reviewer": "claude-opus-5-5",
+      "diff": "Retry loop never sleeps and has no cap.\n+    while not ok:\n+        ok = call()",
+      "spec": "Spec: retry at most 5 times with backoff.",
+      "finding": "BLOCK. The loop retries forever with no delay, against a spec of five retries with backoff. A failing dependency will be hammered and the process will hang."
+    },
+    {
+      "id": "c04",
+      "expected": "defect_minor",
+      "reviewer": "gpt-6.1-sol",
+      "diff": "Docstring says the function returns a list but it returns a tuple.\n+def pair(): return (1, 2)\n+    \"\"\"Return a list.\"\"\"",
+      "spec": "Spec: add a helper returning two values.",
+      "finding": "BLOCK. The docstring says list but the function returns a tuple. Callers unpack correctly, so behaviour is unaffected; the wording is wrong."
+    },
+    {
+      "id": "c05",
+      "expected": "policy_gate",
+      "reviewer": "gpt-6.1-sol",
+      "diff": "Change edits .github/workflows/release.yml to add a publish step.\n+      - run: npm publish",
+      "spec": "Spec: release automation. Repository rule: any release or publish script change is merged only by the owner.",
+      "finding": "BLOCK. This PR changes a publish step. Under the repository rule, publish scripts are owner-reserved, so it cannot be merged by the review process whatever its quality. The code itself reads fine."
+    },
+    {
+      "id": "c06",
+      "expected": "process_slip",
+      "reviewer": "claude-opus-5-5",
+      "diff": "Small refactor renaming a helper in three files, all callers updated.",
+      "spec": "Spec: rename helper to normalize_name.",
+      "finding": "BLOCK. The reviewer sandbox could not run the test suite, so the change could not be verified. No defect was found in the diff; the rename is complete in all three files."
+    },
+    {
+      "id": "c07",
+      "expected": "over_strict",
+      "reviewer": "gpt-6.1-sol",
+      "diff": "Adds a log line at info level.\n+    log.info('started')",
+      "spec": "Spec: log service start.",
+      "finding": "BLOCK. The log message should be longer and include the version. Style preference only; the spec is met and nothing breaks."
+    },
+    {
+      "id": "c08",
+      "expected": "over_strict",
+      "reviewer": "claude-opus-5-5",
+      "diff": "Adds a unit test for an existing pure function; passes.\n+def test_add(): assert add(1, 2) == 3",
+      "spec": "Spec: add a test for add().",
+      "finding": "BLOCK. The test uses a single case and should also cover negative numbers. The spec asked for one test and it is correct as written."
+    },
+    {
+      "id": "c09",
+      "expected": "defect",
+      "reviewer": "gpt-6.1-sol",
+      "diff": "Migration drops a column that the running app still reads.\n+ALTER TABLE users DROP COLUMN legacy_id;",
+      "spec": "Spec: remove unused column legacy_id. Evidence in diff: models.py line 40 still reads user.legacy_id.",
+      "finding": "BLOCK. The migration drops legacy_id but models.py still reads it, so the app will fail on every user lookup after deploy."
+    },
+    {
+      "id": "c10",
+      "expected": "unresolved",
+      "reviewer": "claude-opus-5-5",
+      "diff": "Config loader change; the diff shows only a moved import.\n-from a import b\n+from a import b  # moved",
+      "spec": "Spec: unavailable.",
+      "finding": "BLOCK. Something may be wrong with how config is loaded but the review gives no concrete failing case and the diff shows only a moved import."
+    }
+  ]
+}
