@@ -327,3 +327,41 @@ def test_ledger_identity_reads_the_dispatcher_receipt_schema(tmp_path):
     assert driver.ledger_identity(led, "y") == ("gpt-6.1-sol", "low")
     assert driver.ledger_identity(led, "z") == (None, None)
     assert driver.ledger_identity(tmp_path / "missing", "x") == (None, None)
+
+
+def test_validate_rejects_non_string_unresolved_reason():
+    from review_loop import judge
+    for bad in ({"x": 1}, 5, [1], True):
+        with pytest.raises(ValueError, match="unresolved_reason"):
+            judge.validate({"receipts": [{"round": 1, "partial": True, "unresolved_reason": bad, "findings": []}]})
+    judge.validate({"receipts": [{"round": 1, "partial": True, "unresolved_reason": "why", "findings": []}]})
+    judge.validate({"receipts": [{"round": 1, "partial": True, "unresolved_reason": None, "findings": []}]})
+
+
+def test_malformed_unresolved_reason_leaves_receipts_unresolved_and_week_completes(tmp_path):
+    bad = "JUDGMENT_JSON: " + json.dumps({"receipts": [
+        {"round": 1, "partial": True, "unresolved_reason": {"x": 1}, "findings": []},
+        {"round": 2, "partial": True, "unresolved_reason": {"x": 1}, "findings": []}]})
+    fake = Fake(reply=bad)
+    summary = driver.run_week(fake.env(), rows(3), tmp_path, with_calibration=False)
+    assert summary["U"] == 1.0 or summary["U"] > summary["L"]  # aggregation did not crash
+    state = json.loads((tmp_path / WEEK / "judgments-state.json").read_text())
+    reasons = {r["unresolved_reason"] for j in state["a"].values() for r in j["receipts"]}
+    assert reasons == {"judge_unparseable"}
+
+
+def test_text_vanishing_between_runs_does_not_overwrite_checkpointed_judgments(tmp_path):
+    fake = Fake(quota=lambda n: 0.2 if n < 1 else 0.95)  # pause right after Stage A of the first PR
+    with pytest.raises(driver.Paused):
+        driver.run_week(fake.env(), rows(3), tmp_path, with_calibration=False)
+    part = json.loads((tmp_path / WEEK / "judgments-state.json").read_text())["partial"]
+    pr0 = next(iter(part))
+    assert part[pr0]["a"] and all(r["findings"] for r in part[pr0]["a"].values())
+    fake.quota_fn = lambda n: 0.2
+    fake.no_text = {pr0}  # the finding text can no longer be retrieved
+    calls_before = len(fake.calls)
+    driver.run_week(fake.env(), rows(3), tmp_path, with_calibration=False)
+    state = json.loads((tmp_path / WEEK / "judgments-state.json").read_text())
+    kept = state["a"][pr0]["receipts"]
+    assert kept and all(r["findings"] and r["text_recovered"] for r in kept)  # the saved defect survived
+    assert any(c.startswith("B:" + pr0) for c in fake.calls[calls_before:])  # Stage B used the frozen evidence

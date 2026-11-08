@@ -190,12 +190,18 @@ def judge_pr(env: Env, s: dict, frame_blocks: dict, log: list[dict], part: dict 
     part = part if part is not None else {}
     done_a, done_b = part.setdefault("a", {}), part.setdefault("b", {})
     blocks = {b["round"]: b for b in frame_blocks[pr]}
-    evid = {rd: env.evidence(pr, blocks[rd]) for rd in s["rounds"]}
+    # Evidence is frozen on first retrieval: a resume reuses it, so text that
+    # disappears later cannot overwrite a checkpointed judgment or change a prompt.
+    frozen = part.setdefault("evid", {})
+    for rd in s["rounds"]:
+        if str(rd) not in frozen:
+            frozen[str(rd)] = env.evidence(pr, blocks[rd])
+    evid = {rd: frozen[str(rd)] for rd in s["rounds"]}
     groups: dict[str, list[int]] = {}
     for rd in s["rounds"]:
         if not evid[rd].get("text"):
-            done_a[str(rd)] = _unresolved(rd, "text_unrecovered", recovered=False)
-            done_b[str(rd)] = _unresolved(rd, "text_unrecovered", recovered=False)
+            done_a.setdefault(str(rd), _unresolved(rd, "text_unrecovered", recovered=False))
+            done_b.setdefault(str(rd), _unresolved(rd, "text_unrecovered", recovered=False))
         else:
             groups.setdefault(core.lab_of(blocks[rd]["reviewer"]), []).append(rd)
     for lab, rounds in groups.items():
@@ -248,7 +254,10 @@ def second_judge(env: Env, sample: list[dict], frame_blocks: dict, stage_a: dict
         key = f"{pr}|{rd}"
         if key not in done:
             block = {b["round"]: b for b in frame_blocks[pr]}[rd]
-            rec = _receipt_block(rd, block["head"], env.evidence(pr, block), stage_b=False, stage_a=None)
+            ev = env.evidence(pr, block)
+            if not ev.get("text"):
+                continue  # text no longer retrievable: skip the item, never judge an empty finding
+            rec = _receipt_block(rd, block["head"], ev, stage_b=False, stage_a=None)
             j2 = _try_judge(env, stage_prompt(pr, [rec], outcome_aware=False), block["reviewer"], f"S:{pr}:{rd}", log)
             r2 = next((r for r in (j2 or {"receipts": []})["receipts"] if r["round"] == rd), None)
             r1 = next(r for r in stage_a[pr]["receipts"] if r["round"] == rd)

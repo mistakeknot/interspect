@@ -62,6 +62,8 @@ def validate(data: dict) -> None:
             raise ValueError("partial must be a boolean")
         if not isinstance(r.get("findings", []), list):
             raise ValueError("findings must be a list")
+        if r.get("unresolved_reason") is not None and not isinstance(r["unresolved_reason"], str):
+            raise ValueError("unresolved_reason must be a string or null")
     rounds = [r["round"] for r in data["receipts"]]
     if len(set(rounds)) != len(rounds):
         raise ValueError("a round is judged more than once")
