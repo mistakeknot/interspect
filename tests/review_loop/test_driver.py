@@ -365,3 +365,55 @@ def test_text_vanishing_between_runs_does_not_overwrite_checkpointed_judgments(t
     kept = state["a"][pr0]["receipts"]
     assert kept and all(r["findings"] and r["text_recovered"] for r in kept)  # the saved defect survived
     assert any(c.startswith("B:" + pr0) for c in fake.calls[calls_before:])  # Stage B used the frozen evidence
+
+
+def test_evidence_is_checkpointed_before_a_dispatch_failure(tmp_path):
+    class Boom(Fake):
+        def dispatch(self, prompt, reviewer, tag):
+            raise RuntimeError("dispatch down")
+    with pytest.raises(RuntimeError):
+        driver.run_week(Boom().env(), rows(3), tmp_path, with_calibration=False)
+    part = json.loads((tmp_path / WEEK / "judgments-state.json").read_text())["partial"]
+    assert part and all(len(p["evid"]) == 2 for p in part.values())
+    first = next(iter(part))
+    frozen_text = part[first]["evid"]["0"]["text"] if "0" in part[first]["evid"] else next(iter(part[first]["evid"].values()))["text"]
+    # resume with different evidence: the frozen text is what the judge sees
+    seen = []
+    ok = Fake()
+    ok.evidence = lambda pr, block: {"text": "CHANGED", "diff": "d", "spec": "s", "outcome": "o"}
+    orig = ok.dispatch
+    ok.dispatch = lambda prompt, reviewer, tag: (seen.append((tag, prompt)), orig(prompt, reviewer, tag))[1]
+    driver.run_week(ok.env(), rows(3), tmp_path, with_calibration=False)
+    first_a = next(p for t, p in seen if t == "A:" + first)
+    assert frozen_text in first_a and "CHANGED" not in first_a
+
+
+def test_evidence_is_checkpointed_when_a_later_retrieval_fails(tmp_path):
+    class Late(Fake):
+        n = 0
+        def evidence(self, pr, block):
+            Late.n += 1
+            if Late.n == 2:
+                raise OSError("gh unavailable")
+            return super().evidence(pr, block)
+    with pytest.raises(OSError):
+        driver.run_week(Late().env(), rows(3), tmp_path, with_calibration=False)
+    part = json.loads((tmp_path / WEEK / "judgments-state.json").read_text())["partial"]
+    assert sum(len(p["evid"]) for p in part.values()) == 1  # the first retrieval survived
+
+
+def test_persisted_evidence_is_capped():
+    big = {"text": "t" * 100_000, "diff": "d" * 500_000, "spec": "s" * 100_000, "outcome": "o" * 100_000, "extra": "x"}
+    out = driver.freeze_evidence(big)
+    assert set(out) == {"text", "diff", "spec", "outcome"}
+    assert len(out["text"]) == driver.MAX_TEXT_BYTES and len(out["diff"]) == driver.MAX_DIFF_BYTES
+
+
+def test_reply_cannot_set_driver_owned_keys(tmp_path):
+    reply = "JUDGMENT_JSON: " + json.dumps({"receipts": [
+        {"round": r, "partial": False, "unresolved_reason": None, "driver_unresolved": True, "text_recovered": False,
+         "findings": [{"category": "logic-bug", "outcome": "defect", "class": "unknown", "severity": "high",
+                       "mechanism": "m", "prevent_with": "test"}]} for r in (0, 1)]})
+    fake = Fake(reply=reply)
+    driver.run_week(fake.env(), rows(1), tmp_path, with_calibration=False)
+    assert any(c.startswith("B:") for c in fake.calls)  # Stage B still ran: the reply did not mark A unavailable
