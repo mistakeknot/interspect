@@ -59,9 +59,8 @@ def parse_time(value: str) -> dt.datetime:
 def normalize_time(value: str) -> str:
     """Canonical UTC string with a fixed nine-digit fraction, so string order is
     time order at full precision."""
+    parse_time(value)  # rejects malformed text and impossible calendar dates
     m = _TIME.match(value)
-    if not m:
-        raise ValueError(f"unsupported timestamp {value!r}")
     return f"{m.group(1)}.{(m.group(2) or '0')[:9].ljust(9, '0')}Z"
 
 
@@ -494,6 +493,7 @@ def aggregate(sample: list[dict], judgments: dict, manifest: dict, population: d
     outcomes: Counter = Counter()
     for s in sample:
         j = judgments.get(s["pr"])
+        reasons["no_judgment"] += len(s["rounds"]) - len(j["receipts"] if j else [])
         for r in (j["receipts"] if j else []):
             out = receipt_outcome(r.get("findings", []), bool(r.get("partial")))
             outcomes[out] += 1
@@ -516,7 +516,7 @@ def aggregate(sample: list[dict], judgments: dict, manifest: dict, population: d
         "U": upper,
         "judged_only_conditional": judged_only,
         "confirmed_on_partial_receipts": partial_confirmed,
-        "unresolved_reasons": dict(sorted(reasons.items())),
+        "unresolved_reasons": {k: v for k, v in sorted(reasons.items()) if v},
         "receipt_outcomes": dict(sorted(outcomes.items())),
         "interval": None,
     }
@@ -654,7 +654,8 @@ def digest_block(manifest: dict, agg: dict, proposals: list[dict], recoverable: 
         f"review-loop {manifest['week']} (rubric {manifest['rubric_version']})",
         f"BLOCK receipts {agg['n_block_receipts_population']}, sampled PRs {agg['sampled_prs']}",
         f"confirmed-defect share: lower {_pct(agg['L'])}, upper {_pct(agg['U'])}",
-        f"unresolved: {sum(agg['unresolved_reasons'].values())} receipts; text recovered {rec}",
+        f"unresolved: {sum(v for k, v in agg['unresolved_reasons'].items() if k != 'partial_with_confirmed_defect')} "
+        f"receipts; text recovered {rec}",
         "top mechanisms: " + ("; ".join(top) if top else "none over threshold"),
     ]
     return "\n".join(lines[:10]) + "\n"

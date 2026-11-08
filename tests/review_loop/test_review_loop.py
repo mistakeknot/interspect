@@ -41,6 +41,11 @@ def test_timestamps_with_fractions_and_bad_rows():
     assert [r["pr"] for r in rows] == ["o/r#1"]
 
 
+def test_impossible_calendar_date_is_dropped_not_fatal():
+    bad = {**rec(1, "09-29", "BLOCK"), "created_at": "2026-09-31T10:00:00Z"}
+    assert core.load_receipts([bad, rec(2, "09-29", "BLOCK")]) == core.load_receipts([rec(2, "09-29", "BLOCK")])
+
+
 def test_sub_microsecond_order_is_preserved():
     a = {**rec(1, "09-29", "BLOCK", head="late", did="a"), "created_at": "2026-09-29T10:00:00.0000009Z"}
     b = {**rec(1, "09-29", "BLOCK", head="early", did="b"), "created_at": "2026-09-29T10:00:00.0000001Z"}
@@ -243,6 +248,16 @@ def test_absent_expected_round_counts_as_unresolved_and_bounds_stay_in_range():
     assert 0 <= lo <= up <= 1
 
 
+def test_missing_judgments_are_reported_as_unresolved_reasons():
+    sample = sample_rows(4, blocks=2)
+    judgments = {sample[0]["pr"]: {"receipts": [{"round": 1, "findings": [finding()]},
+                                                {"round": 2, "findings": [finding("over_strict")]}]}}
+    agg = core.aggregate(sample, judgments, {"week": WEEK, "bootstrap_seed": 1}, {"n_block_receipts": 8})
+    assert agg["unresolved_reasons"] == {"no_judgment": 6}
+    digest = core.digest_block({"week": WEEK, "rubric_version": "v1"}, agg, [], None)
+    assert "unresolved: 6 receipts" in digest and agg["L"] < agg["U"]
+
+
 def test_analysis_pools_never_overwrite_allocation_strata():
     frame = []
     for i in range(28):
@@ -294,8 +309,10 @@ def test_report_and_digest_are_bounded_and_say_what_they_are(tmp_path):
     plan = core.allocate(frame_of(20))
     text = core.render_report(manifest, pop, plan, agg, {}, [], {"recovered": 10, "total": 10})
     assert "lower bound" in text and "Nothing here ranks" in text
+    assert "lower bound 100.0%, upper bound 100.0%" in text  # every sampled receipt is a defect
     digest = core.digest_block(manifest, agg, [], {"recovered": 10, "total": 10})
     assert len(digest.splitlines()) <= 10
+    assert "lower 100.0%, upper 100.0%" in digest and "unresolved: 0 receipts" in digest
 
 
 def _write_receipts(directory, rows):
