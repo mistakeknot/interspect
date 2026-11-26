@@ -476,12 +476,38 @@ def real_quota() -> list[dict]:
     return json.loads(out.stdout)["accounts"]
 
 
-class TextIndex:
-    """Fallback finding-text source until receipts carry findings: review output
-    files under the given roots that name the receipt's full head sha. A file
-    that names more than one head, or none, is not matched."""
+def receipt_finding_text(findings: object) -> str | None:
+    """Finding text from a receipt's persisted ``findings`` list (class, severity,
+    summary, file, line), one line per finding. None when the list is empty or
+    not a list of objects."""
+    if not isinstance(findings, list):
+        return None
+    lines = []
+    for f in findings:
+        if not isinstance(f, dict) or not f.get("summary"):
+            continue
+        where = f.get("file") or ""
+        if where and f.get("line") is not None:
+            where += f":{f['line']}"
+        lines.append(" ".join(x for x in (f"[{f.get('severity') or '?'}]", str(f.get("class") or ""),
+                                          where and f"({where})", "-", str(f["summary"])) if x))
+    return "PERSISTED REVIEW FINDINGS:\n" + "\n".join(lines) if lines else None
 
-    def __init__(self, roots: list[pathlib.Path], max_files: int = 5000):
+
+class TextIndex:
+    """Finding-text source. First choice: the ``findings`` a receipt persists
+    (``receipts`` rows, as read by ``read_receipts``), keyed by head sha. Fallback
+    for older receipts: review output files under the given roots that name the
+    receipt's full head sha; a file that names more than one head, or none, is
+    not matched. ``source_counts`` records which source served each lookup."""
+
+    def __init__(self, roots: list[pathlib.Path], max_files: int = 5000, receipts: list[dict] | None = None):
+        self.by_receipt: dict[str, str] = {}
+        self.source_counts = {"receipt": 0, "text-files": 0, "none": 0}
+        for row in receipts or []:
+            head, text = row.get("head_sha"), receipt_finding_text(row.get("findings"))
+            if head and text:
+                self.by_receipt.setdefault(head, text)
         self.by_head: dict[str, list[pathlib.Path]] = {}
         seen = 0
         for root in roots:
@@ -502,9 +528,14 @@ class TextIndex:
                     self.by_head.setdefault(next(iter(heads)), []).append(path)
 
     def text_for(self, head: str | None) -> str | None:
+        if head in self.by_receipt:
+            self.source_counts["receipt"] += 1
+            return self.by_receipt[head]
         paths = self.by_head.get(head or "")
         if not paths or len(paths) > 1:
+            self.source_counts["none"] += 1
             return None
+        self.source_counts["text-files"] += 1
         return paths[0].read_text(errors="ignore")
 
 

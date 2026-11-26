@@ -417,3 +417,26 @@ def test_reply_cannot_set_driver_owned_keys(tmp_path):
     fake = Fake(reply=reply)
     driver.run_week(fake.env(), rows(1), tmp_path, with_calibration=False)
     assert any(c.startswith("B:") for c in fake.calls)  # Stage B still ran: the reply did not mark A unavailable
+
+
+def test_text_index_prefers_receipt_findings_and_falls_back(tmp_path):
+    persisted, older, none = "1" * 40, "2" * 40, "3" * 40
+    (tmp_path / "old.md").write_text(f"review of {older}\nVERDICT: BLOCK\nlegacy text\n")
+    rows = [
+        {"head_sha": persisted, "findings": [
+            {"class": "logic-correctness", "severity": "P1", "summary": "cutoff drops work", "file": "compact.ts", "line": 40}]},
+        {"head_sha": none, "findings": [], "findings_source": "unknown"},
+        {"head_sha": older, "findings": None},
+    ]
+    idx = driver.TextIndex([tmp_path], receipts=rows)
+    text = idx.text_for(persisted)
+    assert "[P1] logic-correctness (compact.ts:40) - cutoff drops work" in text
+    assert "legacy text" in idx.text_for(older)
+    assert idx.text_for(none) is None and idx.text_for("4" * 40) is None
+    assert idx.source_counts == {"receipt": 1, "text-files": 1, "none": 2}
+
+
+def test_receipt_finding_text_ignores_malformed_findings():
+    assert driver.receipt_finding_text(None) is None
+    assert driver.receipt_finding_text([None, {"severity": "P1"}, "x"]) is None
+    assert "(a.py)" in driver.receipt_finding_text([{"summary": "s", "file": "a.py"}])
