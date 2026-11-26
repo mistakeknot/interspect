@@ -440,3 +440,29 @@ def test_receipt_finding_text_ignores_malformed_findings():
     assert driver.receipt_finding_text(None) is None
     assert driver.receipt_finding_text([None, {"severity": "P1"}, "x"]) is None
     assert "(a.py)" in driver.receipt_finding_text([{"summary": "s", "file": "a.py"}])
+
+
+def test_receipt_finding_text_skips_wrong_typed_fields():
+    good = {"class": "c", "severity": "P2", "summary": "kept", "file": "a.py", "line": 3}
+    bad = [{"summary": "s", "file": 42, "line": 1}, {"summary": 7}, {"summary": "s", "line": "9"},
+           {"summary": "s", "line": True}, {"summary": "s", "class": ["x"]}, {"summary": "  "}]
+    text = driver.receipt_finding_text(bad + [good])
+    assert text.count("\n") == 1 and "kept" in text and "(a.py:3)" in text
+    assert driver.receipt_finding_text(bad) is None
+
+
+def test_text_index_survives_malformed_findings_and_uses_fallback(tmp_path):
+    head = "5" * 40
+    (tmp_path / "old.md").write_text(f"review of {head}\nVERDICT: BLOCK\nlegacy text\n")
+    idx = driver.TextIndex([tmp_path], receipts=[{"head_sha": head, "findings": [{"summary": "s", "file": 42, "line": 1}]}])
+    assert "legacy text" in idx.text_for(head)
+    assert idx.source_counts["receipt"] == 0 and idx.source_counts["text-files"] == 1
+
+
+def test_receipt_text_wins_when_both_sources_match(tmp_path):
+    head = "6" * 40
+    (tmp_path / "old.md").write_text(f"review of {head}\nVERDICT: BLOCK\nlegacy text\n")
+    idx = driver.TextIndex([tmp_path], receipts=[{"head_sha": head, "findings": [{"summary": "from receipt"}]}])
+    text = idx.text_for(head)
+    assert "from receipt" in text and "legacy text" not in text
+    assert idx.source_counts == {"receipt": 1, "text-files": 0, "none": 0}

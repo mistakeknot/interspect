@@ -478,19 +478,27 @@ def real_quota() -> list[dict]:
 
 def receipt_finding_text(findings: object) -> str | None:
     """Finding text from a receipt's persisted ``findings`` list (class, severity,
-    summary, file, line), one line per finding. None when the list is empty or
-    not a list of objects."""
+    summary, file, line), one line per finding. A finding whose summary is not a
+    non-empty string, or whose class, severity, file or line has the wrong type,
+    is skipped. None when no usable finding remains."""
     if not isinstance(findings, list):
         return None
     lines = []
     for f in findings:
-        if not isinstance(f, dict) or not f.get("summary"):
+        if not isinstance(f, dict):
             continue
-        where = f.get("file") or ""
-        if where and f.get("line") is not None:
-            where += f":{f['line']}"
-        lines.append(" ".join(x for x in (f"[{f.get('severity') or '?'}]", str(f.get("class") or ""),
-                                          where and f"({where})", "-", str(f["summary"])) if x))
+        summary, cls, sev = f.get("summary"), f.get("class"), f.get("severity")
+        file, line = f.get("file"), f.get("line")
+        if not isinstance(summary, str) or not summary.strip():
+            continue
+        if any(v is not None and not isinstance(v, str) for v in (cls, sev, file)):
+            continue
+        if line is not None and (isinstance(line, bool) or not isinstance(line, int)):
+            continue
+        where = file or ""
+        if where and line is not None:
+            where += f":{line}"
+        lines.append(" ".join(x for x in (f"[{sev or '?'}]", cls or "", where and f"({where})", "-", summary) if x))
     return "PERSISTED REVIEW FINDINGS:\n" + "\n".join(lines) if lines else None
 
 
