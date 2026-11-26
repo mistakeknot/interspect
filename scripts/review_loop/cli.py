@@ -93,7 +93,8 @@ def cmd_run(a) -> int:
     now = core.parse_time(a.run_at)
     out_root = pathlib.Path(a.out_root)
     out_root.mkdir(parents=True, exist_ok=True)
-    index = driver.TextIndex([pathlib.Path(r) for r in a.text_root])
+    receipt_rows = driver.read_receipts(pathlib.Path(a.receipts))
+    index = driver.TextIndex([pathlib.Path(r) for r in a.text_root], receipts=receipt_rows)
     env = driver.Env(
         evidence=driver.make_real_evidence(index),
         dispatch=driver.make_real_dispatch(pathlib.Path(a.clavain_root),
@@ -101,7 +102,7 @@ def cmd_run(a) -> int:
         quota=driver.real_quota,
         now=lambda: now)
     try:
-        summary = driver.run_week(env, driver.read_receipts(pathlib.Path(a.receipts)), out_root,
+        summary = driver.run_week(env, receipt_rows, out_root,
                                   week=a.week, with_calibration=not a.no_calibration)
     except ValueError as exc:
         print(f"refusing to run: {exc}", file=sys.stderr)
@@ -113,6 +114,7 @@ def cmd_run(a) -> int:
         print(f"judge dispatch failed: {exc}; finished calls are kept, rerun to resume", file=sys.stderr)
         return 4
     print(json.dumps(summary, sort_keys=True))
+    print(f"finding text by source: {json.dumps(index.source_counts, sort_keys=True)}", file=sys.stderr)
     return 0
 
 
